@@ -1,0 +1,6 @@
+# The career API is not deployed with the static build. It stays in the
+# repo so it can be run locally or promoted to serverless functions later.
+server
+scripts
+.env
+.claude
