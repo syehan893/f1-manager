@@ -127,9 +127,9 @@ function temperamentOf(driver: Driver): Temperament {
   const a = driver.attributes;
   return {
     patience: clamp01(a.consistency / 100),
-    aggression: clamp01(a.overtaking / 100),
+    aggression: clamp01(a.attack / 100),
     // Steady, experienced drivers keep the radio quiet.
-    vocal: clamp01(0.85 - a.consistency / 160 + a.overtaking / 260),
+    vocal: clamp01(0.85 - a.consistency / 160 + a.attack / 260),
     temper: clamp01(0.75 - a.consistency / 150),
   };
 }

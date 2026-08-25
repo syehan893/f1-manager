@@ -37,15 +37,47 @@ export type FlagState =
 
 /* ------------------------------- People ------------------------------ */
 
+/**
+ * What a driver is made of. Split deliberately into three groups, because
+ * they age in different directions and that is most of what makes a grid
+ * of twenty-two people feel like people rather than like one number each.
+ *
+ *   raw speed   arrives young, and is the first thing to go
+ *   wheel-to-wheel and race management  are learned, and hold up far longer
+ *   the rest    sit somewhere between the two
+ *
+ * A nineteen-year-old is quick and hopeless at defending; a forty-year-old
+ * has lost half a second a lap and will still not let you past.
+ */
 export interface DriverAttributes {
+  /* --- raw speed: peaks in the mid-twenties, declines first --------- */
   pace: number; // 0-100 raw single-lap speed
   cornering: number;
   braking: number;
-  overtaking: number;
+  /** Reflexes off the line. The first thing age takes. */
+  reaction: number;
+
+  /* --- wheel to wheel: learned, and slow to fade -------------------- */
+  /** Executing a pass: commitment, placement, making it stick. */
+  attack: number;
+  /** Holding a position under pressure without losing time doing it. */
+  defence: number;
+  /** Judgement in traffic — when to commit, when to let it go. */
+  racecraft: number;
+
+  /* --- managing a race --------------------------------------------- */
   consistency: number;
-  reaction: number; // race starts
+  /** Making a set of tyres last without giving up the lap time. */
+  tyreManagement: number;
+  /** Holding the pace to the flag rather than fading in the last third. */
   stamina: number;
+
+  /* --- conditions and the team -------------------------------------- */
   wetWeather: number;
+  /** Getting up to speed on an unfamiliar car or circuit. Youth helps. */
+  adaptability: number;
+  /** Quality of technical feedback — what the engineers can act on. */
+  feedback: number;
 }
 
 export interface Contract {

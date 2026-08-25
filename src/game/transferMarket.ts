@@ -228,7 +228,7 @@ export function applyTransferMoves(state: GameState, moves: TransferMove[]): voi
         state.driverRecords[prospect.id] = {
           driverId: prospect.id,
           age: prospect.age,
-          formDelta: 0,
+          deltas: {},
           seasonsRun: 0,
           careerPoints: 0,
           careerWins: 0,

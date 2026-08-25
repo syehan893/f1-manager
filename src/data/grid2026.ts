@@ -1,4 +1,6 @@
-import type { Driver, DriverAttributes, Team } from '@/types';
+import { seedAttributes } from './attributeSeed';
+import type { AuthoredAttributes } from './attributeSeed';
+import type { Driver, Team } from '@/types';
 
 /* =====================================================================
  * 2026 grid composition — eleven teams, twenty-two cars.
@@ -48,20 +50,25 @@ export interface GridTeam extends Team {
   hiringBar: number;
 }
 
+/**
+ * The eight authored numbers for a driver. The five learned attributes —
+ * defending, racecraft, tyre management, adaptability and feedback — are
+ * derived from these and the driver's age in `seedAttributes`.
+ */
 const a = (
   pace: number,
   cornering: number,
   braking: number,
-  overtaking: number,
+  attack: number,
   consistency: number,
   reaction: number,
   stamina: number,
   wetWeather: number,
-): DriverAttributes => ({
+): AuthoredAttributes => ({
   pace,
   cornering,
   braking,
-  overtaking,
+  attack,
   consistency,
   reaction,
   stamina,
@@ -260,7 +267,7 @@ interface DriverSeed {
   morale: number;
   salary: number;
   expires: number;
-  attrs: DriverAttributes;
+  attrs: AuthoredAttributes;
 }
 
 const DRIVER_SEEDS: DriverSeed[] = [
@@ -308,7 +315,7 @@ export const GRID_2026_DRIVERS: Driver[] = DRIVER_SEEDS.map((seed) => ({
   country: seed.country,
   carNumber: seed.carNumber,
   age: seed.age,
-  attributes: seed.attrs,
+  attributes: seedAttributes(seed.id, seed.age, seed.attrs),
   morale: seed.morale,
   fitness: Math.max(70, 100 - Math.max(0, seed.age - 30) * 2),
   contract: {
@@ -334,13 +341,19 @@ export function driversOfTeam(teamId: string): Driver[] {
 /** Blended 0-100 rating of a driver, used for qualifying and race pace. */
 export function driverRating(driver: Driver): number {
   const v = driver.attributes;
+  /* Raw speed still leads, but a driver who cannot defend a position or
+   * make a set of tyres last is not the same asset as one who can, and
+   * the rating has to say so or the market prices them identically. */
   return Math.round(
-    v.pace * 0.34 +
-      v.cornering * 0.22 +
-      v.braking * 0.12 +
-      v.consistency * 0.16 +
-      v.overtaking * 0.1 +
-      v.reaction * 0.06,
+    v.pace * 0.26 +
+      v.cornering * 0.16 +
+      v.braking * 0.09 +
+      v.consistency * 0.13 +
+      v.attack * 0.09 +
+      v.defence * 0.08 +
+      v.racecraft * 0.08 +
+      v.tyreManagement * 0.07 +
+      v.reaction * 0.04,
   );
 }
 

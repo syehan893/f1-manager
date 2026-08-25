@@ -722,6 +722,240 @@ check(
   `reliability 28: ${fragileRetirements} vs reliability 55: ${hardRetirements}`,
 );
 
+/* --- driver attributes ------------------------------------------------ *
+ * The whole point of the new stats is that two identical cars should not
+ * produce identical races. Each check isolates one attribute by cloning
+ * the field and changing only that number. */
+console.log('\n== driver attributes ==');
+
+/** A grid where every driver is identical except for one attribute. */
+function uniformGrid(overrides: Partial<Record<string, number>> = {}) {
+  return DRIVERS.map((driver) => ({
+    ...driver,
+    attributes: {
+      pace: 85,
+      cornering: 85,
+      braking: 85,
+      reaction: 70,
+      attack: 70,
+      defence: 70,
+      racecraft: 70,
+      consistency: 70,
+      tyreManagement: 70,
+      stamina: 70,
+      wetWeather: 70,
+      adaptability: 70,
+      feedback: 70,
+      ...overrides,
+    },
+  }));
+}
+
+/* A two-car race so the duel is the only thing happening. The chaser is a
+ * hair slower on paper, so they sit in the mirrors and their lap time is a
+ * direct reading of what the defending is costing them — which is the
+ * mechanism itself rather than a noisy race outcome. */
+function followingLapTime(defence: number, attack: number) {
+  const drivers = [
+    {
+      ...DRIVERS[0]!,
+      attributes: { ...uniformGrid()[0]!.attributes, defence, consistency: 99, stamina: 99 },
+    },
+    {
+      ...DRIVERS[1]!,
+      attributes: {
+        ...uniformGrid()[0]!.attributes,
+        pace: 84,
+        cornering: 84,
+        attack,
+        consistency: 99,
+        stamina: 99,
+      },
+    },
+  ];
+  const leader = drivers[0]!.id;
+  const chaser = drivers[1]!.id;
+
+  const local = createRaceEngine({
+    circuit: SUZUKA,
+    drivers,
+    seed: 7,
+    startLap: 0,
+    totalLaps: 40,
+    tyreWearScale: 1,
+    manualPitDriverIds: [leader, chaser],
+    startingTyres: { [leader]: 'MEDIUM', [chaser]: 'MEDIUM' },
+  });
+  local.applyCommand({ type: 'SET_SPEED', multiplier: 1 });
+
+  const laps: number[] = [];
+  let lastLap = -1;
+  for (let tick = 0; tick < 400_000 && laps.length < 10; tick++) {
+    local.step(16.7);
+    const car = local.getState().cars.find((c) => c.driverId === chaser)!;
+    if (car.lap !== lastLap) {
+      // Only laps actually spent within striking distance count.
+      if (car.lap >= 2 && car.lastLapMs && car.gapToAheadMs < 1_400) laps.push(car.lastLapMs);
+      lastLap = car.lap;
+    }
+  }
+  return laps.length > 0 ? laps.reduce((a, b) => a + b, 0) / laps.length / 1000 : 0;
+}
+
+const behindStrong = followingLapTime(97, 55);
+const behindWeak = followingLapTime(35, 55);
+const behindStrongSharp = followingLapTime(97, 97);
+
+check(
+  'following a strong defender costs real lap time',
+  behindStrong > behindWeak,
+  `defence 97 costs ${(behindStrong - behindWeak).toFixed(3)}s/lap more than defence 35`,
+);
+check(
+  'the penalty is a believable size, not a wall',
+  behindStrong - behindWeak > 0.03 && behindStrong - behindWeak < 0.6,
+  `${(behindStrong - behindWeak).toFixed(3)}s/lap`,
+);
+check(
+  'a better attacker loses less time behind the same defender',
+  behindStrongSharp < behindStrong,
+  `attack 97 claws back ${(behindStrong - behindStrongSharp).toFixed(3)}s/lap`,
+);
+
+/* --- tyre management -------------------------------------------------- */
+function wearAfterLaps(tyreManagement: number) {
+  const drivers = uniformGrid({ tyreManagement });
+  const local = createRaceEngine({
+    circuit: SUZUKA,
+    drivers,
+    seed: 404,
+    startLap: 0,
+    totalLaps: 30,
+    tyreWearScale: 1,
+    manualPitDriverIds: [drivers[0]!.id],
+  });
+  local.applyCommand({ type: 'SET_SPEED', multiplier: 1 });
+  for (let i = 0; i < 60_000; i++) local.step(16.7);
+  return local.getState().cars.find((c) => c.driverId === drivers[0]!.id)!.tyre.wearPct;
+}
+
+const gentleWear = wearAfterLaps(97);
+const harshWear = wearAfterLaps(35);
+check(
+  'a driver who looks after a tyre wears it more slowly',
+  gentleWear < harshWear,
+  `tyre mgmt 97: ${gentleWear.toFixed(1)}% vs 35: ${harshWear.toFixed(1)}%`,
+);
+
+/* --- consistency ------------------------------------------------------ */
+function lapSpread(consistency: number) {
+  const drivers = uniformGrid({ consistency });
+  const local = createRaceEngine({
+    circuit: SUZUKA,
+    drivers,
+    seed: 909,
+    startLap: 0,
+    totalLaps: 40,
+    tyreWearScale: 1,
+    manualPitDriverIds: [drivers[0]!.id],
+  });
+  local.applyCommand({ type: 'SET_SPEED', multiplier: 1 });
+
+  const laps: number[] = [];
+  let seen = 0;
+  for (let i = 0; i < 200_000 && laps.length < 12; i++) {
+    local.step(16.7);
+    const car = local.getState().cars.find((c) => c.driverId === drivers[0]!.id)!;
+    if (car.lap !== seen && car.lastLapMs) {
+      seen = car.lap;
+      laps.push(car.lastLapMs);
+    }
+  }
+  if (laps.length < 4) return 0;
+  const mean = laps.reduce((a, b) => a + b, 0) / laps.length;
+  return Math.sqrt(laps.reduce((sum, l) => sum + (l - mean) ** 2, 0) / laps.length);
+}
+
+const tidySpread = lapSpread(98);
+const raggedSpread = lapSpread(35);
+check(
+  'a consistent driver repeats the lap more closely',
+  tidySpread < raggedSpread,
+  `consistency 98: ±${(tidySpread / 1000).toFixed(3)}s vs 35: ±${(raggedSpread / 1000).toFixed(3)}s`,
+);
+
+/* --- stamina ---------------------------------------------------------- */
+function lateRacePace(stamina: number) {
+  const drivers = uniformGrid({ stamina });
+  const local = createRaceEngine({
+    circuit: SUZUKA,
+    drivers,
+    seed: 616,
+    startLap: 0,
+    totalLaps: 30,
+    tyreWearScale: 1,
+    manualPitDriverIds: [drivers[0]!.id],
+  });
+  local.applyCommand({ type: 'SET_SPEED', multiplier: 1 });
+
+  let early = 0;
+  let late = 0;
+  for (let i = 0; i < 400_000; i++) {
+    local.step(16.7);
+    const car = local.getState().cars.find((c) => c.driverId === drivers[0]!.id)!;
+    if (car.lap === 5 && car.lastLapMs) early = car.lastLapMs;
+    if (car.lap === 27 && car.lastLapMs) {
+      late = car.lastLapMs;
+      break;
+    }
+    if (local.getState().sessionState === 'FINISHED') break;
+  }
+  return early > 0 && late > 0 ? late - early : 0;
+}
+
+const fitFade = lateRacePace(98);
+const unfitFade = lateRacePace(35);
+check(
+  'a driver short on stamina fades in the closing laps',
+  unfitFade > fitFade,
+  `stamina 98 faded ${(fitFade / 1000).toFixed(2)}s, stamina 35 faded ${(unfitFade / 1000).toFixed(2)}s`,
+);
+
+/* --- the start -------------------------------------------------------- *
+ * Reaction is spent as a pace advantage over the opening lap rather than
+ * as a jump up the grid, so it is measured at the end of lap one. */
+function positionAfterOpeningLap(reaction: number) {
+  const drivers = uniformGrid().map((driver, index) =>
+    index === 10 ? { ...driver, attributes: { ...driver.attributes, reaction } } : driver,
+  );
+  const local = createRaceEngine({
+    circuit: SUZUKA,
+    drivers,
+    seed: 31,
+    startLap: 0,
+    totalLaps: 20,
+    tyreWearScale: 1,
+    startingTyres: Object.fromEntries(drivers.map((d) => [d.id, 'MEDIUM' as const])),
+  });
+  local.applyCommand({ type: 'SET_SPEED', multiplier: 1 });
+
+  const target = drivers[10]!.id;
+  for (let tick = 0; tick < 40_000; tick++) {
+    local.step(16.7);
+    const car = local.getState().cars.find((c) => c.driverId === target)!;
+    if (car.lap >= 1) return car.position;
+  }
+  return 99;
+}
+
+const quickLaunch = positionAfterOpeningLap(99);
+const slowLaunch = positionAfterOpeningLap(20);
+check(
+  'reflexes decide the launch off the line',
+  quickLaunch < slowLaunch,
+  `from the same grid slot: reaction 99 ran P${quickLaunch} after a lap, reaction 20 ran P${slowLaunch}`,
+);
+
 /* --- starting tyres --------------------------------------------------- */
 console.log('\n== starting tyres ==');
 

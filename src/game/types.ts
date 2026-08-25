@@ -286,8 +286,12 @@ export interface StaffAppointment {
 export interface DriverRecord {
   driverId: string;
   age: number;
-  /** Signed points added to every attribute since the career began. */
-  formDelta: number;
+  /**
+   * Signed drift per attribute since the career began. Each one moves on
+   * its own curve, so a veteran can be down on pace and up on racecraft
+   * at the same time.
+   */
+  deltas: Partial<Record<keyof DriverAttributes, number>>;
   seasonsRun: number;
   careerPoints: number;
   careerWins: number;
@@ -440,7 +444,7 @@ export interface RoundRecord {
   pointsScored: number;
 }
 
-export const SAVE_VERSION = 9;
+export const SAVE_VERSION = 10;
 
 export interface GameState {
   /** Bumped when the shape changes; older saves are discarded on load. */

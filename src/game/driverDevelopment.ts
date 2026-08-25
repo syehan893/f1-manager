@@ -1,5 +1,6 @@
 import { DRIVER_BY_ID } from '@/data/drivers';
 import { driverRating } from '@/data/grid2026';
+import { seedAttributes } from '@/data/attributeSeed';
 import type { Driver, DriverAttributes } from '@/types';
 import type { DriverRecord, GameState, ProspectDriver } from './types';
 
@@ -27,10 +28,62 @@ import type { DriverRecord, GameState, ProspectDriver } from './types';
  * and a young signing is a genuine investment.
  * ===================================================================== */
 
-const GROWTH_UNTIL_AGE = 24;
-const DECLINE_FROM_AGE = 32;
-/** Hard ceiling on how far any driver can drift from their base rating. */
-const MAX_DELTA = 14;
+/* ---------------------------------------------------------------------
+ * The curves.
+ *
+ * One age curve for the whole driver was the thing that made careers read
+ * as a single slider. Every attribute now has its own, and they point in
+ * different directions on purpose:
+ *
+ *   reaction peaks at twenty-four and falls away fastest — reflexes go
+ *   pace peaks in the mid-twenties and is the next to go
+ *   defending, racecraft and tyre management are *learned*, peak in the
+ *     mid-thirties, and barely decline at all
+ *   adaptability runs backwards: the young pick up a new car quickest
+ *
+ * That is what makes a veteran a different proposition rather than simply
+ * a worse one — half a second slower and still impossible to pass.
+ * ------------------------------------------------------------------- */
+
+export interface AttributeCurve {
+  /** Age at which this attribute stops improving on age alone. */
+  peakAge: number;
+  /** Points per season gained before the peak. */
+  growth: number;
+  /** Points per season lost after it, before acceleration. */
+  decline: number;
+  /** How much beating or losing to a team-mate moves it. */
+  formWeight: number;
+}
+
+export const CURVES: Record<keyof DriverAttributes, AttributeCurve> = {
+  // Raw speed: early peak, real decline.
+  pace: { peakAge: 26, growth: 2.6, decline: 0.55, formWeight: 1.2 },
+  cornering: { peakAge: 27, growth: 2.4, decline: 0.45, formWeight: 1 },
+  braking: { peakAge: 27, growth: 2.2, decline: 0.4, formWeight: 0.9 },
+  reaction: { peakAge: 24, growth: 2.8, decline: 0.78, formWeight: 0.5 },
+
+  // Wheel to wheel: learned, and slow to fade.
+  attack: { peakAge: 28, growth: 2.2, decline: 0.35, formWeight: 1.1 },
+  defence: { peakAge: 32, growth: 1.8, decline: 0.14, formWeight: 0.9 },
+  racecraft: { peakAge: 33, growth: 1.9, decline: 0.1, formWeight: 1 },
+
+  // Managing a race.
+  consistency: { peakAge: 33, growth: 1.7, decline: 0.12, formWeight: 1.1 },
+  tyreManagement: { peakAge: 34, growth: 1.5, decline: 0.08, formWeight: 0.8 },
+  stamina: { peakAge: 27, growth: 2, decline: 0.62, formWeight: 0.3 },
+
+  // Conditions and the team.
+  wetWeather: { peakAge: 31, growth: 1.6, decline: 0.2, formWeight: 0.6 },
+  // Runs the other way: youth adapts fastest, and that fades early.
+  adaptability: { peakAge: 23, growth: 2.2, decline: 0.6, formWeight: 0.4 },
+  feedback: { peakAge: 35, growth: 1.4, decline: 0.05, formWeight: 0.7 },
+};
+
+export const ATTRIBUTE_KEYS = Object.keys(CURVES) as Array<keyof DriverAttributes>;
+
+/** Hard ceiling on how far any one attribute can drift from where it began. */
+const MAX_DELTA = 18;
 
 /* ------------------------------ the record ----------------------------- */
 
@@ -38,7 +91,7 @@ export function blankRecord(driverId: string, age: number): DriverRecord {
   return {
     driverId,
     age,
-    formDelta: 0,
+    deltas: {},
     seasonsRun: 0,
     careerPoints: 0,
     careerWins: 0,
@@ -55,19 +108,16 @@ export function seedDriverRecords(driverIds: string[]): Record<string, DriverRec
 
 /* --------------------------- resolving a driver ------------------------ */
 
-function shiftAttributes(base: DriverAttributes, delta: number): DriverAttributes {
-  const move = (value: number) => Math.max(30, Math.min(99, Math.round(value + delta)));
-  return {
-    ...base,
-    pace: move(base.pace),
-    cornering: move(base.cornering),
-    braking: move(base.braking),
-    consistency: move(base.consistency),
-    overtaking: move(base.overtaking),
-    reaction: move(base.reaction),
-    stamina: move(base.stamina),
-    wetWeather: move(base.wetWeather),
-  };
+function shiftAttributes(
+  base: DriverAttributes,
+  deltas: Partial<Record<keyof DriverAttributes, number>>,
+): DriverAttributes {
+  const shifted = { ...base };
+  for (const key of ATTRIBUTE_KEYS) {
+    const move = deltas[key] ?? 0;
+    shifted[key] = Math.max(25, Math.min(99, Math.round(base[key] + move)));
+  }
+  return shifted;
 }
 
 /**
@@ -87,7 +137,7 @@ export function effectiveDriver(state: GameState | null, driverId: string): Driv
   return {
     ...base,
     age: record.age,
-    attributes: shiftAttributes(base.attributes, record.formDelta),
+    attributes: shiftAttributes(base.attributes, record.deltas),
   };
 }
 
@@ -114,6 +164,9 @@ export interface DevelopmentNote {
   change: number;
   ageAfter: number;
   reason: 'GROWTH' | 'PEAK' | 'DECLINE';
+  /** The two attributes that moved most, for the season review. */
+  biggestGain: { key: keyof DriverAttributes; change: number } | null;
+  biggestLoss: { key: keyof DriverAttributes; change: number } | null;
 }
 
 /**
@@ -125,7 +178,7 @@ export function advanceDriverSeason(state: GameState): DevelopmentNote[] {
   const notes: DevelopmentNote[] = [];
 
   for (const record of Object.values(state.driverRecords)) {
-    const before = record.formDelta;
+    const ratingBefore = currentRating(state, record.driverId);
     record.age += 1;
     record.seasonsRun += 1;
 
@@ -144,36 +197,55 @@ export function advanceDriverSeason(state: GameState): DevelopmentNote[] {
     // −1 (beaten badly) .. +1 (beat the team-mate comfortably).
     const form = total > 0 ? (points / total - 0.5) * 2 : 0;
 
-    // Career tallies, which the history screen reads.
     record.careerPoints += points;
     record.careerWins += row?.wins ?? 0;
 
-    const noise = (seeded(state.season, record.driverId) - 0.5) * 1.4;
-    let change: number;
-    let reason: DevelopmentNote['reason'];
+    /* Racing seasons are what actually teach the learned attributes, so a
+     * driver who has run ten years keeps gaining on them long after their
+     * raw speed has turned over. */
+    const mileage = Math.min(1, record.seasonsRun / 8);
 
-    if (record.age <= GROWTH_UNTIL_AGE) {
-      // Young drivers improve fast, and faster still when they deliver.
-      change = 2.4 + form * 1.6 + noise;
-      reason = 'GROWTH';
-    } else if (record.age < DECLINE_FROM_AGE) {
-      // At their level: only form moves them, and not by much.
-      change = form * 1.1 + noise * 0.7;
-      reason = 'PEAK';
-    } else {
-      // The drop accelerates, and results only soften it.
-      const years = record.age - DECLINE_FROM_AGE + 1;
-      change = -(0.5 + years * 0.32) + form * 0.9 + noise * 0.5;
-      reason = 'DECLINE';
+    let biggestGain: DevelopmentNote['biggestGain'] = null;
+    let biggestLoss: DevelopmentNote['biggestLoss'] = null;
+
+    for (const key of ATTRIBUTE_KEYS) {
+      const curve = CURVES[key];
+      const noise = (seeded(state.season, record.driverId + key) - 0.5) * 1.2;
+
+      let change: number;
+      if (record.age <= curve.peakAge) {
+        // Still climbing, and climbing faster when the results back it up.
+        change = curve.growth + form * curve.formWeight + noise;
+      } else {
+        /* Past the peak the loss accelerates, but experience keeps paying
+         * into the learned attributes for years afterwards — which is why
+         * a veteran's defending holds up while their reactions do not. */
+        const years = record.age - curve.peakAge;
+        const fade = curve.decline * (1 + years * 0.16);
+        const learned = curve.decline < 0.2 ? mileage * 0.55 : 0;
+        change = -fade + learned + form * curve.formWeight * 0.7 + noise * 0.6;
+      }
+
+      const before = record.deltas[key] ?? 0;
+      const after = Math.max(-MAX_DELTA, Math.min(MAX_DELTA, before + change));
+      record.deltas[key] = Math.round(after * 10) / 10;
+
+      const moved = after - before;
+      if (!biggestGain || moved > biggestGain.change) biggestGain = { key, change: moved };
+      if (!biggestLoss || moved < biggestLoss.change) biggestLoss = { key, change: moved };
     }
 
-    record.formDelta = Math.max(-MAX_DELTA, Math.min(MAX_DELTA, record.formDelta + change));
+    const ratingAfter = currentRating(state, record.driverId);
+    const peakish = CURVES.pace.peakAge;
 
     notes.push({
       driverId: record.driverId,
-      change: record.formDelta - before,
+      change: ratingAfter - ratingBefore,
       ageAfter: record.age,
-      reason,
+      reason:
+        record.age <= peakish ? 'GROWTH' : record.age <= CURVES.racecraft.peakAge ? 'PEAK' : 'DECLINE',
+      biggestGain: biggestGain && biggestGain.change > 0.15 ? biggestGain : null,
+      biggestLoss: biggestLoss && biggestLoss.change < -0.15 ? biggestLoss : null,
     });
   }
 
@@ -235,17 +307,20 @@ export function buildProspects(season: number, count = 6): ProspectDriver[] {
     const raw = Math.round(potential - 10 - r4 * 12);
 
     /* A junior is quick and fearless and short on the things only laps
-     * teach: consistency, stamina, and reading a wet track. */
-    const attrs: DriverAttributes = {
+     * teach. The seeding helper handles the rest: at seventeen it hands
+     * them almost no defending, racecraft or tyre management, which is
+     * exactly the gap they spend their first seasons closing. */
+    const age = 17 + Math.floor(r4 * 4);
+    const attrs = seedAttributes(`prospect-${season}-${index}`, age, {
       pace: raw,
       cornering: raw - 1 + Math.round(r1 * 3),
       braking: raw - 2 + Math.round(r2 * 4),
-      overtaking: raw + Math.round(r4 * 4),
+      attack: raw + Math.round(r4 * 4),
       consistency: raw - 8 + Math.round(r3 * 4),
       reaction: raw + 2 + Math.round(r1 * 3),
       stamina: raw - 4 + Math.round(r2 * 5),
       wetWeather: raw - 7 + Math.round(r3 * 6),
-    };
+    });
 
     prospects.push({
       id: `prospect-${season}-${index}`,
@@ -253,7 +328,7 @@ export function buildProspects(season: number, count = 6): ProspectDriver[] {
       firstName: first,
       lastName: last,
       countryCode: PROSPECT_COUNTRIES[Math.floor(r3 * PROSPECT_COUNTRIES.length)]!,
-      age: 17 + Math.floor(r4 * 4),
+      age,
       potential,
       attributes: attrs,
       // Juniors are cheap, which is most of the appeal.

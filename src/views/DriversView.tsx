@@ -13,16 +13,59 @@ import type { Driver, DriverAttributes } from '@/types';
 
 type Scope = 'team' | 'grid';
 
-const ATTRIBUTES: Array<{ key: keyof DriverAttributes; label: string }> = [
-  { key: 'pace', label: 'Pace' },
-  { key: 'cornering', label: 'Cornering' },
-  { key: 'braking', label: 'Braking' },
-  { key: 'overtaking', label: 'Racecraft' },
-  { key: 'consistency', label: 'Consistency' },
-  { key: 'reaction', label: 'Reaction Time' },
-  { key: 'stamina', label: 'Stamina' },
-  { key: 'wetWeather', label: 'Wet Weather' },
+/**
+ * Grouped the way the attributes actually behave over a career: raw speed
+ * fades, wheel-to-wheel and race management are learned. Seeing them side
+ * by side is how a veteran reads as a different driver rather than a
+ * worse one.
+ */
+const ATTRIBUTE_GROUPS: Array<{
+  label: string;
+  tone: string;
+  keys: Array<{ key: keyof DriverAttributes; label: string }>;
+}> = [
+  {
+    label: 'Speed',
+    tone: 'var(--color-neon-cyan)',
+    keys: [
+      { key: 'pace', label: 'Pace' },
+      { key: 'cornering', label: 'Cornering' },
+      { key: 'braking', label: 'Braking' },
+      { key: 'reaction', label: 'Starts' },
+    ],
+  },
+  {
+    label: 'Wheel to wheel',
+    tone: 'var(--color-neon-red)',
+    keys: [
+      { key: 'attack', label: 'Attack' },
+      { key: 'defence', label: 'Defence' },
+      { key: 'racecraft', label: 'Racecraft' },
+    ],
+  },
+  {
+    label: 'Race management',
+    tone: 'var(--color-neon-lime)',
+    keys: [
+      { key: 'consistency', label: 'Consistency' },
+      { key: 'tyreManagement', label: 'Tyre Mgmt' },
+      { key: 'stamina', label: 'Stamina' },
+    ],
+  },
+  {
+    label: 'Team and conditions',
+    tone: 'var(--color-neon-violet)',
+    keys: [
+      { key: 'wetWeather', label: 'Wet Weather' },
+      { key: 'adaptability', label: 'Adaptability' },
+      { key: 'feedback', label: 'Feedback' },
+    ],
+  },
 ];
+
+/** Flat list, for the radar and anywhere order matters more than grouping. */
+const ATTRIBUTES: Array<{ key: keyof DriverAttributes; label: string }> =
+  ATTRIBUTE_GROUPS.flatMap((group) => group.keys);
 
 /** Eight-axis radar of a driver's attribute spread. */
 function AttributeRadar({ driver, color }: { driver: Driver; color: string }) {
@@ -223,15 +266,30 @@ export function DriversView() {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-x-5 gap-y-2 sm:grid-cols-2">
-              {ATTRIBUTES.map((attribute) => (
-                <StatBar
-                  key={attribute.key}
-                  label={attribute.label}
-                  value={selected.attributes[attribute.key]}
-                  color={team.color}
-                  size="sm"
-                />
+            {/* Grouped the way the attributes age. Seeing raw speed next to
+                the learned attributes is how a veteran reads as a different
+                driver rather than a worse one. */}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              {ATTRIBUTE_GROUPS.map((group) => (
+                <div key={group.label}>
+                  <p
+                    className="mb-1.5 text-[9px] font-bold tracking-widest uppercase"
+                    style={{ color: group.tone }}
+                  >
+                    {group.label}
+                  </p>
+                  <div className="grid gap-y-2">
+                    {group.keys.map((attribute) => (
+                      <StatBar
+                        key={attribute.key}
+                        label={attribute.label}
+                        value={selected.attributes[attribute.key]}
+                        color={group.tone}
+                        size="sm"
+                      />
+                    ))}
+                  </div>
+                </div>
               ))}
             </div>
 

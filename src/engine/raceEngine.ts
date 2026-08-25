@@ -111,6 +111,40 @@ const BOOST_CUTOFF_PCT = 4;
 const BOOST_ARM_MIN_PCT = 12;
 const PUSH_ERS_DRAIN = 55;
 const PUSH_WEAR_MULTIPLIER = 1.45;
+
+/* --- wheel to wheel ---------------------------------------------------- *
+ * Overtaking used to be arithmetic: the quicker car arrived, the slower
+ * car moved over. There was no contest in it, so a great defensive driver
+ * was worth exactly nothing and a race was decided entirely by the car.
+ *
+ * Now a car within striking distance is in a *duel*. The defender's line
+ * costs the attacker time, and how much depends on defence against attack.
+ * A strong defender can hold a quicker car for laps; a weak one is passed
+ * on sight. And a defender under sustained pressure eventually makes a
+ * mistake, which is what breaks the stalemate rather than a coin flip.
+ * -------------------------------------------------------------------- */
+/**
+ * Worst-case lap time a perfect defender costs a hopeless attacker, as a
+ * fraction of a lap. Roughly half a second on a ninety-second lap — which
+ * is about what dirty air plus a defensive line is worth in reality, and
+ * small enough that a genuinely quicker car still gets the job done.
+ */
+const DEFENCE_MAX_PENALTY = 0.006;
+/** Range at which a duel is on at all. */
+const DUEL_RANGE_MS = 1_400;
+/** Per-lap chance a defender under pressure gives the position away. */
+const DEFENDER_ERROR_PER_LAP = 0.13;
+/** Defending costs the defender time too — it is not a free action. */
+const DEFENCE_SELF_COST = 0.0016;
+
+/** How much tyre management moves the wear rate, either way. */
+const TYRE_SKILL_SWING = 0.26;
+/** Lap-time spread a maximally inconsistent driver adds. */
+const CONSISTENCY_NOISE = 0.011;
+/** Pace lost in the closing third by a driver with no stamina. */
+const STAMINA_FADE = 0.009;
+/** Lap-time swing between the best and worst launch off the line. */
+const LAUNCH_SWING = 0.021;
 const PUSH_FUEL_MULTIPLIER = 1.14;
 /** Push is refused above this wear — the driver simply has nothing left. */
 const PUSH_TYRE_LIMIT_PCT = 96;
@@ -213,6 +247,29 @@ interface CarInternal {
   compoundBias: number;
   /** 0-1 how well this car manages what it has. */
   racecraft: number;
+  /* --- the driver, as the race actually feels them ------------------ */
+  /** 0-1 executing a pass. */
+  attack: number;
+  /** 0-1 holding a position. */
+  defence: number;
+  /** 0-1 judgement in traffic. */
+  judgement: number;
+  /** Multiplier on tyre wear from the driver's own hands. */
+  tyreSkill: number;
+  /** 0-1 lap-to-lap repeatability. */
+  consistency: number;
+  /** 0-1 holding pace to the flag. */
+  stamina: number;
+  /** 0-1 reflexes off the line. */
+  reaction: number;
+  /** Race-time this car has spent stuck behind the same driver. */
+  duelMs: number;
+  /** Who they are duelling, so pressure does not reset every tick. */
+  duelTargetId: string | null;
+  /** Guards the once-per-lap defender error roll. */
+  errorCheckedLap: number;
+  /** Pace advantage carried off the line, spent over the opening lap. */
+  launchGain: number;
   lapNoise: number;
   lastOvertakeAtMs: number;
   /** Guards the single lap rollover that happens inside the pit lane. */
@@ -451,7 +508,7 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       driverId: driver.id,
       paceFactor,
       // A harder AI commits to moves it would otherwise let go.
-      aggression: (attrs.overtaking / 100) * (isAi ? 0.7 + aiSkill * 0.8 : 1),
+      aggression: (attrs.attack / 100) * (isAi ? 0.7 + aiSkill * 0.8 : 1),
       // From lights out the stop is planned around 40% distance; joining a
       // race in progress keeps the original "box within a few laps" window.
       /* A stronger AI plans its stop closer to the real optimum and with
@@ -493,6 +550,18 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       compoundBias: plan.compoundBias,
       // A car the player runs has no AI racecraft: that is the player's job.
       racecraft: isAi ? aiRacecraft : 0,
+      attack: attrs.attack / 100,
+      defence: attrs.defence / 100,
+      judgement: attrs.racecraft / 100,
+      // A good tyre driver gets meaningfully more out of a set.
+      tyreSkill: 1 + TYRE_SKILL_SWING * (0.5 - attrs.tyreManagement / 100) * 2,
+      consistency: attrs.consistency / 100,
+      stamina: attrs.stamina / 100,
+      reaction: attrs.reaction / 100,
+      duelMs: 0,
+      duelTargetId: null,
+      errorCheckedLap: -1,
+      launchGain: 0,
       lapNoise: 0,
       lastOvertakeAtMs: -Infinity,
       pitLapCounted: false,
@@ -543,6 +612,27 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       pushLaps: 0,
     };
   });
+
+  /* --- the start ----------------------------------------------------- *
+   * Reaction has existed as an attribute since the first version and has
+   * never done anything. A standing start is the one moment it decides
+   * something.
+   *
+   * It is modelled as a pace advantage over the opening lap rather than
+   * as an instant jump up the road: shifting a car's lap progress on the
+   * grid can wrap it across the start/finish line, and the lap-counting
+   * bookkeeping is anchored to which side of that line a car started on.
+   */
+  if (startLap === 0) {
+    for (const driver of drivers) {
+      const internal = internals.get(driver.id);
+      if (!internal) continue;
+      // −0.5 (asleep) .. +0.5 (away perfectly), with a little scatter.
+      const launch = internal.reaction - 0.5 + (rng() - 0.5) * 0.35;
+      // Worth up to about half a second over the first lap, either way.
+      internal.launchGain = launch * LAUNCH_SWING;
+    }
+  }
 
   /* --- scripted demonstration pass ---------------------------------- */
 
@@ -641,6 +731,42 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       const zoneHit = circuit.drsZones.some((z) => inZone(car.lapProgress, z.start, z.end));
       if (zoneHit) factor -= DRS_GAIN;
       factor -= 0.0022; // slipstream
+    }
+
+    /* The duel. A car in range is not simply following — it is being
+     * actively held up, and by how much depends on the two drivers rather
+     * than on the two cars. This is what a defensive driver is worth. */
+    if (ahead && car.gapToAheadMs > 0 && car.gapToAheadMs < DUEL_RANGE_MS) {
+      const defender = internals.get(ahead.driverId);
+      if (defender) {
+        /* Attack against defence, softened by how close they actually are:
+         * a car half a second back is under far more threat than one at
+         * one-point-three. */
+        const proximity = 1 - car.gapToAheadMs / DUEL_RANGE_MS;
+        const contest = clamp(defender.defence - internal.attack + 0.5, 0, 1);
+        factor += DEFENCE_MAX_PENALTY * contest * proximity;
+      }
+    }
+
+    /* Defending is not free. A driver covering the inside line is off the
+     * racing line and losing time doing it, which is why a long defence
+     * drags both cars back towards the pack. */
+    const chaser = state.cars.find((c) => c.position === car.position + 1);
+    if (chaser && chaser.gapToAheadMs > 0 && chaser.gapToAheadMs < DUEL_RANGE_MS * 0.7) {
+      factor += DEFENCE_SELF_COST * internal.defence;
+    }
+
+    /* The start: a good launch is worth real time through the opening
+     * corners, and it is gone by the end of lap one. */
+    if (internal.launchGain !== 0 && car.lap <= startLap) {
+      factor -= internal.launchGain;
+    }
+
+    /* Stamina: a driver who cannot hold the pace fades in the last third
+     * of the race, which is where a long stint is actually decided. */
+    const raceProgress = state.totalLaps > 0 ? car.lap / state.totalLaps : 0;
+    if (raceProgress > 0.66) {
+      factor += STAMINA_FADE * (1 - internal.stamina) * ((raceProgress - 0.66) / 0.34);
     }
 
     /* Under a neutralisation nobody races: every car runs to the same
@@ -850,6 +976,65 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
         }
       }
 
+      /* --- pressure --------------------------------------------------
+       * A duel that goes nowhere for lap after lap is the least
+       * interesting thing a race can do. Pressure accumulates on the
+       * defender, and sooner or later a driver short on composure runs
+       * wide and the position goes. A great defender can hold almost
+       * indefinitely; an ordinary one cannot. */
+      if (
+        ahead &&
+        car.status === 'LAPPING' &&
+        ahead.status === 'LAPPING' &&
+        car.gapToAheadMs > 0 &&
+        car.gapToAheadMs < DUEL_RANGE_MS
+      ) {
+        if (internal.duelTargetId !== ahead.driverId) {
+          internal.duelTargetId = ahead.driverId;
+          internal.duelMs = 0;
+        }
+        internal.duelMs += dt;
+      } else {
+        internal.duelTargetId = null;
+        internal.duelMs = Math.max(0, internal.duelMs - dt * 2);
+      }
+
+      /* One roll per lap, and only once the pressure has genuinely been
+       * on for a while. Composure is the defender's consistency and
+       * judgement; the attacker's own judgement decides whether they are
+       * in a position to take the opening when it appears. */
+      const defender = ahead ? internals.get(ahead.driverId) : undefined;
+      if (
+        defender &&
+        internal.duelMs > 45_000 &&
+        internal.errorCheckedLap !== car.lap &&
+        state.neutralisedLapsRemaining === 0
+      ) {
+        internal.errorCheckedLap = car.lap;
+
+        const composure = defender.defence * 0.55 + defender.consistency * 0.45;
+        const opportunism = internal.attack * 0.6 + internal.judgement * 0.4;
+        const risk = DEFENDER_ERROR_PER_LAP * (1 - composure) * (0.4 + opportunism);
+
+        if (rng() < risk) {
+          /* The door opens: the attacker gets a decisive burst rather
+           * than a teleport, so the pass still has to be completed on
+           * track and still shows up as a move on the map. */
+          internal.pushMs = Math.max(internal.pushMs, 7_000);
+          internal.scriptedHoldMs = 9_000;
+          internal.duelMs = 0;
+
+          pushIncident(state, {
+            id: `inc-${eventSeq++}`,
+            lap: car.lap + 1,
+            atMs: state.elapsedMs,
+            kind: 'RADIO',
+            driverId: car.driverId,
+            message: `${ahead?.driverId ?? 'The car ahead'} ran wide under pressure — the door is open`,
+          });
+        }
+      }
+
       if (internal.scriptedHoldMs > 0) internal.scriptedHoldMs -= dt;
 
       /* Override drops out the moment the store cannot deliver, and it
@@ -939,10 +1124,14 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       car.lapProgress += delta;
 
       const tyreModel = TYRE_MODEL[car.tyre.compound];
+      /* Team-level tyre care (the strategist) and the driver's own hands
+       * both apply. Two cars on the same compound genuinely do not wear it
+       * at the same rate. */
       const wearRate =
         tyreModel.wearPerLap *
         wearScale *
         internal.tyreCare *
+        internal.tyreSkill *
         (car.attacking ? PUSH_WEAR_MULTIPLIER : 1);
       car.tyre.wearPct = clamp(car.tyre.wearPct + delta * wearRate, 0, 100);
       car.tyre.temperatureC = clamp(
@@ -994,7 +1183,9 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
           car.bestLapMs == null ? car.currentLapMs : Math.min(car.bestLapMs, car.currentLapMs);
         car.currentLapMs = 0;
         car.tyre.ageLaps += 1;
-        internal.lapNoise = (rng() - 0.5) * 0.0055;
+        /* Lap-to-lap scatter is the driver, not the car. A metronomic
+         * driver repeats the lap; a ragged one gives some of it back. */
+        internal.lapNoise = (rng() - 0.5) * CONSISTENCY_NOISE * (1.15 - internal.consistency);
 
         /* Power-unit failure: one roll per lap, and only once the unit is
          * genuinely worn. Abusing push and override all race is what puts

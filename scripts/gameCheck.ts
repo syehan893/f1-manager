@@ -12,7 +12,7 @@ import { seasonScore } from '../src/game/transferMarket';
 import { profileFor } from '../src/game/difficulty';
 import { PARTS, enginePenaltyPlaces, fittedUnit } from '../src/game/carModel';
 import { developmentGain, partLevel } from '../src/game/partDevelopment';
-import { currentRating, prospectToDriver } from '../src/game/driverDevelopment';
+import { ATTRIBUTE_KEYS, currentRating, prospectToDriver } from '../src/game/driverDevelopment';
 import { currentSeasonRecord } from '../src/game/seasonArchive';
 import { ROLES } from '../src/data/staff';
 import { staffMarket, staffRndEfficiency, vacantRoles } from '../src/game/staffing';
@@ -599,15 +599,64 @@ check(
 
 const youngId = GRID_2026_DRIVERS.reduce((a, b) => (a.age < b.age ? a : b)).id;
 const oldId = GRID_2026_DRIVERS.reduce((a, b) => (a.age > b.age ? a : b)).id;
+const youngDeltas = state.driverRecords[youngId]?.deltas ?? {};
+const oldDeltas = state.driverRecords[oldId]?.deltas ?? {};
+
 check(
   'a teenager improves over an off-season',
-  (state.driverRecords[youngId]?.formDelta ?? 0) > 0,
-  `${youngId} ${(state.driverRecords[youngId]?.formDelta ?? 0).toFixed(1)}`,
+  (youngDeltas.pace ?? 0) > 0,
+  `${youngId} pace ${(youngDeltas.pace ?? 0).toFixed(1)}`,
 );
 check(
-  'a driver past their peak declines',
-  (state.driverRecords[oldId]?.formDelta ?? 0) < 0,
-  `${oldId} ${(state.driverRecords[oldId]?.formDelta ?? 0).toFixed(1)}`,
+  'a driver past their peak loses raw speed',
+  (oldDeltas.pace ?? 0) < 0,
+  `${oldId} pace ${(oldDeltas.pace ?? 0).toFixed(1)}`,
+);
+
+/* The whole point of per-attribute curves: a veteran is a *different*
+ * driver, not a uniformly worse one. */
+check(
+  'attributes move independently rather than as one block',
+  new Set(ATTRIBUTE_KEYS.map((key) => (oldDeltas[key] ?? 0).toFixed(1))).size > 3,
+  `${new Set(ATTRIBUTE_KEYS.map((key) => (oldDeltas[key] ?? 0).toFixed(1))).size} distinct values across 13 attributes`,
+);
+check(
+  'reflexes go before racecraft does',
+  (oldDeltas.reaction ?? 0) < (oldDeltas.racecraft ?? 0),
+  `${oldId}: reaction ${(oldDeltas.reaction ?? 0).toFixed(1)} vs racecraft ${(oldDeltas.racecraft ?? 0).toFixed(1)}`,
+);
+check(
+  'a veteran holds the learned attributes far better than raw speed',
+  (oldDeltas.tyreManagement ?? 0) > (oldDeltas.pace ?? 0) &&
+    (oldDeltas.defence ?? 0) > (oldDeltas.pace ?? 0),
+  `pace ${(oldDeltas.pace ?? 0).toFixed(1)}, tyre mgmt ${(oldDeltas.tyreManagement ?? 0).toFixed(1)}, defence ${(oldDeltas.defence ?? 0).toFixed(1)}`,
+);
+check(
+  'the young gain fastest on the things youth is good at',
+  (youngDeltas.reaction ?? 0) > (youngDeltas.feedback ?? 0),
+  `reaction ${(youngDeltas.reaction ?? 0).toFixed(1)} vs feedback ${(youngDeltas.feedback ?? 0).toFixed(1)}`,
+);
+
+/* Seeding has to encode the same idea from the start: a rookie arrives
+ * quick and short on everything that is learned. */
+const rookie = GRID_2026_DRIVERS.reduce((a, b) => (a.age < b.age ? a : b));
+const veteran = GRID_2026_DRIVERS.reduce((a, b) => (a.age > b.age ? a : b));
+check(
+  'a rookie starts short on defending and racecraft',
+  rookie.attributes.defence < rookie.attributes.pace &&
+    rookie.attributes.racecraft < rookie.attributes.pace,
+  `${rookie.lastName} (${rookie.age}): pace ${rookie.attributes.pace}, defence ${rookie.attributes.defence}, racecraft ${rookie.attributes.racecraft}`,
+);
+check(
+  'a veteran starts strong on the learned attributes',
+  veteran.attributes.racecraft > rookie.attributes.racecraft &&
+    veteran.attributes.tyreManagement > rookie.attributes.tyreManagement,
+  `${veteran.lastName} (${veteran.age}) racecraft ${veteran.attributes.racecraft} vs ${rookie.lastName} ${rookie.attributes.racecraft}`,
+);
+check(
+  'the young adapt fastest',
+  rookie.attributes.adaptability > veteran.attributes.adaptability,
+  `${rookie.lastName} ${rookie.attributes.adaptability} vs ${veteran.lastName} ${veteran.attributes.adaptability}`,
 );
 check(
   'the rating a screen shows follows the record',
@@ -618,6 +667,12 @@ check(
   'development is deterministic across a reload',
   JSON.stringify(transition(finalRound, { type: 'CONTINUE_TO_NEXT_WEEK' }).state?.driverRecords) ===
     JSON.stringify(state.driverRecords),
+);
+check(
+  'no attribute can drift beyond the ceiling',
+  Object.values(state.driverRecords).every((record) =>
+    ATTRIBUTE_KEYS.every((key) => Math.abs(record.deltas[key] ?? 0) <= 18.01),
+  ),
 );
 
 console.log('\n== junior intake ==');

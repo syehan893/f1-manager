@@ -60,7 +60,7 @@ function ContractCard({
         {(
           [
             ['Pace', driver.attributes.pace],
-            ['Racecraft', driver.attributes.overtaking],
+            ['Racecraft', driver.attributes.racecraft],
             ['Consistency', driver.attributes.consistency],
           ] as const
         ).map(([label, value]) => (
@@ -369,7 +369,7 @@ export function DriverMarketView() {
                       {driver.attributes.pace}
                     </td>
                     <td className="px-3 py-2 text-right font-mono text-[12px] text-chrome-200">
-                      {driver.attributes.overtaking}
+                      {driver.attributes.racecraft}
                     </td>
                     <td className="px-3 py-2 text-right font-mono text-[13px] font-bold text-neon-cyan">
                       {driverRating(driver)}

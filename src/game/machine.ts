@@ -966,7 +966,7 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         next.driverRecords[prospect.id] = {
           driverId: prospect.id,
           age: prospect.age,
-          formDelta: 0,
+          deltas: {},
           seasonsRun: 0,
           careerPoints: 0,
           careerWins: 0,

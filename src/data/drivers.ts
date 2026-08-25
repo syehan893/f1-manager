@@ -1,5 +1,7 @@
 import { GRID_2026_DRIVERS } from './grid2026.ts';
-import type { Driver, DriverAttributes } from '@/types';
+import { seedAttributes } from './attributeSeed';
+import type { AuthoredAttributes } from './attributeSeed';
+import type { Driver } from '@/types';
 
 const CURRENT_SEASON = 2026;
 
@@ -17,23 +19,23 @@ type Seed = {
   fitness: number;
   salary: number;
   expires: number;
-  attrs: DriverAttributes;
+  attrs: AuthoredAttributes;
 };
 
 const a = (
   pace: number,
   cornering: number,
   braking: number,
-  overtaking: number,
+  attack: number,
   consistency: number,
   reaction: number,
   stamina: number,
   wetWeather: number,
-): DriverAttributes => ({
+): AuthoredAttributes => ({
   pace,
   cornering,
   braking,
-  overtaking,
+  attack,
   consistency,
   reaction,
   stamina,
@@ -158,7 +160,7 @@ export const DRIVERS: Driver[] = SEEDS.map((s) => ({
   country: s.country,
   carNumber: s.carNumber,
   age: s.age,
-  attributes: s.attrs,
+  attributes: seedAttributes(s.id, s.age, s.attrs),
   morale: s.morale,
   fitness: s.fitness,
   contract: {
@@ -191,7 +193,7 @@ export function overallRating(d: Driver): number {
     (v.pace * 1.5 +
       v.cornering * 1.3 +
       v.braking * 1.1 +
-      v.overtaking * 1.1 +
+      v.attack * 1.1 +
       v.consistency * 1.2 +
       v.reaction * 0.8 +
       v.stamina * 0.8 +
