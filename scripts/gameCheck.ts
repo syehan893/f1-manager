@@ -1224,13 +1224,13 @@ const ownDriverId = Object.entries(upgraded.driverTeams)
   .find(([, teamId]) => teamId === upgraded.playerTeamId)![0];
 const planned = must(upgraded, {
   type: 'SET_STRATEGY',
-  plan: { driverId: ownDriverId, stints: [{ compound: 'SOFT', plannedLaps: 9 }], fuelLoadKg: 88, pushLevel: 4 },
+  plan: { driverId: ownDriverId, stints: [{ compound: 'SOFT', plannedLaps: 9 }], pushLevel: 4 },
 }, 'set strategy');
-check('strategy stored against the driver', planned.strategies[ownDriverId]?.fuelLoadKg === 88);
+check('strategy stored against the driver', planned.strategies[ownDriverId]?.pushLevel === 4);
 
 const foreignPlan = transition(planned, {
   type: 'SET_STRATEGY',
-  plan: { driverId: 'verstappen', stints: [], fuelLoadKg: 50, pushLevel: 3 },
+  plan: { driverId: 'verstappen', stints: [], pushLevel: 3 },
 });
 check('cannot plan for a rival driver', !foreignPlan.ok, foreignPlan.message);
 

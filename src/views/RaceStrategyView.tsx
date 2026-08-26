@@ -414,7 +414,6 @@ export function RaceStrategyView() {
 
             {[
               { label: 'Planned stops', value: String(Math.max(0, draft.stints.length - 1)) },
-              { label: 'Fuel needed', value: `${Math.ceil(raceLaps * 1.9)} kg` },
               {
                 label: 'Pace effect',
                 value: `${push.paceGainS >= 0 ? '-' : '+'}${Math.abs(push.paceGainS).toFixed(2)}s`,
