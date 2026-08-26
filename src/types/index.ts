@@ -301,6 +301,15 @@ export type RaceCommand =
   | { type: 'PUSH_MODE'; driverId: string; enabled: boolean }
   /** Cancel a queued pit stop — the "stay out" call. */
   | { type: 'CANCEL_PIT'; driverId: string }
+  /** Live condition update, so a driver's state can change mid-race. */
+  | {
+      type: 'SET_CONDITION';
+      driverId: string;
+      paceFactor: number;
+      errorMultiplier: number;
+      tyreMultiplier: number;
+      aggression: number;
+    }
   /** Retire the car from the session — a pit-wall decision, not a failure. */
   | { type: 'RETIRE_CAR'; driverId: string }
   /** Manual override boost: dumps stored energy for a short burst. */
@@ -372,7 +381,6 @@ export interface StintPlan {
 export interface StrategyPlan {
   driverId: string;
   stints: StintPlan[];
-  fuelLoadKg: number;
   pushLevel: number; // 1-5
 }
 

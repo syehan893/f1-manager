@@ -956,6 +956,148 @@ check(
   `from the same grid slot: reaction 99 ran P${quickLaunch} after a lap, reaction 20 ran P${slowLaunch}`,
 );
 
+/* --- condition and push level ----------------------------------------- *
+ * The condition layer only matters if it reaches the car. Same driver,
+ * same machinery, different state of mind. */
+console.log('\n== condition on track ==');
+
+function raceWith(
+  condition: { paceFactor: number; errorMultiplier: number; tyreMultiplier: number; aggression: number },
+  push: number,
+) {
+  const drivers = uniformGrid();
+  const target = drivers[0]!.id;
+  const local = createRaceEngine({
+    circuit: SUZUKA,
+    drivers,
+    seed: 2024,
+    startLap: 0,
+    totalLaps: 24,
+    tyreWearScale: 1,
+    manualPitDriverIds: [target],
+    startingTyres: Object.fromEntries(drivers.map((d) => [d.id, 'MEDIUM' as const])),
+    condition: { [target]: condition },
+    pushLevel: { [target]: push },
+  });
+  local.applyCommand({ type: 'SET_SPEED', multiplier: 1 });
+
+  const laps: number[] = [];
+  let seen = -1;
+  for (let tick = 0; tick < 200_000 && laps.length < 8; tick++) {
+    local.step(16.7);
+    const car = local.getState().cars.find((c) => c.driverId === target)!;
+    if (car.lap !== seen) {
+      if (car.lap >= 2 && car.lastLapMs) laps.push(car.lastLapMs);
+      seen = car.lap;
+    }
+  }
+  const car = local.getState().cars.find((c) => c.driverId === target)!;
+  const mean = laps.length ? laps.reduce((a, b) => a + b, 0) / laps.length : 0;
+  const spread = laps.length
+    ? Math.sqrt(laps.reduce((sum, l) => sum + (l - mean) ** 2, 0) / laps.length)
+    : 0;
+  return { mean, spread, wear: car.tyre.wearPct };
+}
+
+const NEUTRAL = { paceFactor: 0, errorMultiplier: 1, tyreMultiplier: 1, aggression: 0 };
+const FIRED = { paceFactor: -0.004, errorMultiplier: 2.5, tyreMultiplier: 1.25, aggression: 0.6 };
+const FLAT = { paceFactor: 0.0042, errorMultiplier: 1.2, tyreMultiplier: 1, aggression: -0.5 };
+
+const neutralRun = raceWith(NEUTRAL, 3);
+const firedRun = raceWith(FIRED, 3);
+const flatRun = raceWith(FLAT, 3);
+
+check(
+  'a fired-up driver laps quicker',
+  firedRun.mean < neutralRun.mean,
+  `${(firedRun.mean / 1000).toFixed(3)}s vs ${(neutralRun.mean / 1000).toFixed(3)}s`,
+);
+check(
+  'and is visibly messier lap to lap',
+  firedRun.spread > neutralRun.spread,
+  `±${(firedRun.spread / 1000).toFixed(3)}s vs ±${(neutralRun.spread / 1000).toFixed(3)}s`,
+);
+check(
+  'and is harder on the tyres for it',
+  firedRun.wear > neutralRun.wear,
+  `${firedRun.wear.toFixed(1)}% vs ${neutralRun.wear.toFixed(1)}%`,
+);
+check(
+  'a dejected driver simply loses time',
+  flatRun.mean > neutralRun.mean,
+  `${(flatRun.mean / 1000).toFixed(3)}s vs ${(neutralRun.mean / 1000).toFixed(3)}s`,
+);
+
+/* Push level is the pit wall's own lever on the same three things. */
+const conserveRun = raceWith(NEUTRAL, 1);
+const attackRun = raceWith(NEUTRAL, 5);
+check(
+  'a higher push level finds lap time',
+  attackRun.mean < conserveRun.mean,
+  `push 5 ${(attackRun.mean / 1000).toFixed(3)}s vs push 1 ${(conserveRun.mean / 1000).toFixed(3)}s`,
+);
+check(
+  'and spends the tyres to get it',
+  attackRun.wear > conserveRun.wear,
+  `push 5 ${attackRun.wear.toFixed(1)}% vs push 1 ${conserveRun.wear.toFixed(1)}%`,
+);
+
+/* A live condition change has to land on a running engine without
+ * disturbing it. The alternative — rebuilding the engine when a driver is
+ * talked down — would silently restart the race. */
+const liveDrivers = uniformGrid();
+const liveTarget = liveDrivers[0]!.id;
+const liveEngine = createRaceEngine({
+  circuit: SUZUKA,
+  drivers: liveDrivers,
+  seed: 606,
+  startLap: 0,
+  totalLaps: 30,
+  tyreWearScale: 1,
+  manualPitDriverIds: [liveTarget],
+  startingTyres: Object.fromEntries(liveDrivers.map((d) => [d.id, 'MEDIUM' as const])),
+});
+liveEngine.applyCommand({ type: 'SET_SPEED', multiplier: 1 });
+for (let tick = 0; tick < 30_000; tick++) liveEngine.step(16.7);
+
+const beforeCall = liveEngine.getState().cars.find((c) => c.driverId === liveTarget)!;
+const distanceBefore = beforeCall.raceDistance;
+const elapsedBefore = liveEngine.getState().elapsedMs;
+
+liveEngine.applyCommand({
+  type: 'SET_CONDITION',
+  driverId: liveTarget,
+  paceFactor: -0.004,
+  errorMultiplier: 2.5,
+  tyreMultiplier: 1.25,
+  aggression: 0.6,
+});
+
+const afterCall = liveEngine.getState().cars.find((c) => c.driverId === liveTarget)!;
+check(
+  'a live condition change does not restart the race',
+  afterCall.raceDistance === distanceBefore &&
+    liveEngine.getState().elapsedMs === elapsedBefore,
+  `still at lap ${afterCall.lap}, ${(elapsedBefore / 1000).toFixed(0)}s elapsed`,
+);
+
+// And it has to actually take effect from there on.
+const lapsAfter: number[] = [];
+let seenLive = afterCall.lap;
+for (let tick = 0; tick < 120_000 && lapsAfter.length < 5; tick++) {
+  liveEngine.step(16.7);
+  const car = liveEngine.getState().cars.find((c) => c.driverId === liveTarget)!;
+  if (car.lap !== seenLive) {
+    seenLive = car.lap;
+    if (car.lastLapMs) lapsAfter.push(car.lastLapMs);
+  }
+}
+check(
+  'and the new state takes effect from that moment',
+  lapsAfter.length > 0,
+  `${lapsAfter.length} laps run under the new condition`,
+);
+
 /* --- starting tyres --------------------------------------------------- */
 console.log('\n== starting tyres ==');
 

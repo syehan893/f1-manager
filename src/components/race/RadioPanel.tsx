@@ -19,8 +19,15 @@ import { TyreBadge } from '@/components/ui/TyreBadge';
 import { gridTeamOf } from '@/data/grid2026';
 import { useTeamOf } from '@/state/useTeamOf';
 import type { LucideIcon } from 'lucide-react';
-import { lapsOfLifeLeft } from '@/game/driverRadio';
+import { PIT_WALL_CALLS, lapsOfLifeLeft } from '@/game/driverRadio';
 import type { DecisionKind, RadioMessage, RadioSeverity } from '@/game/driverRadio';
+import {
+  EMOTION_BLURB,
+  EMOTION_LABEL,
+  EMOTION_TONE,
+  conditionOf,
+  emotionOf,
+} from '@/game/driverCondition';
 import { TYRE_COLOR, cx, formatGap, formatLapTime } from '@/lib/format';
 import { useGame } from '@/state/gameContext';
 import { useRace } from '@/state/raceContext';
@@ -152,6 +159,91 @@ function ConditionStrip({ car, wearScale }: { car: CarState; wearScale: number }
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/* ------------------------- how they are feeling ------------------------- */
+
+/**
+ * Mood, stress and the emotion they add up to, alongside the four calls a
+ * pit wall can actually make. This is the half of a race radio the game
+ * never had: a manager who can only answer questions is not managing
+ * anybody.
+ */
+function DriverState({ driverId }: { driverId: string }) {
+  const { state } = useGame();
+  const { callDriver } = useRace();
+
+  const condition = conditionOf(state, driverId);
+  const emotion = emotionOf(condition);
+  const tone = EMOTION_TONE[emotion];
+
+  const bars = [
+    { label: 'Mood', value: condition.mood, tone: 'var(--color-neon-lime)', good: 'high' },
+    { label: 'Stress', value: condition.stress, tone: 'var(--color-neon-red)', good: 'low' },
+    { label: 'Morale', value: condition.morale, tone: 'var(--color-neon-cyan)', good: 'high' },
+  ];
+
+  return (
+    <div className="mt-2.5 rounded-md border border-carbon-600/70 bg-carbon-950/40 p-2.5">
+      <div className="flex items-center gap-2">
+        <motion.span
+          animate={
+            emotion === 'RATTLED' || emotion === 'FIRED_UP'
+              ? { opacity: [1, 0.4, 1] }
+              : { opacity: 1 }
+          }
+          transition={{ duration: 1.3, repeat: Infinity }}
+          className="size-2 shrink-0 rounded-full"
+          style={{ background: tone, boxShadow: `0 0 8px ${tone}` }}
+        />
+        <span
+          className="text-[11px] font-bold tracking-wide uppercase"
+          style={{ color: tone }}
+          title={EMOTION_BLURB[emotion]}
+        >
+          {EMOTION_LABEL[emotion]}
+        </span>
+      </div>
+
+      <div className="mt-2 grid grid-cols-3 gap-1.5">
+        {bars.map((bar) => (
+          <div key={bar.label}>
+            <p className="flex items-center justify-between text-[8px] tracking-widest text-chrome-600 uppercase">
+              {bar.label}
+              <span className="font-mono" style={{ color: bar.tone }}>
+                {Math.round(bar.value)}
+              </span>
+            </p>
+            <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-carbon-700">
+              <div
+                className="h-full rounded-full transition-[width] duration-300"
+                style={{ width: `${bar.value}%`, background: bar.tone }}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* The pit wall speaking first. */}
+      <div className="mt-2 grid grid-cols-4 gap-1">
+        {PIT_WALL_CALLS.map((entry) => (
+          <button
+            key={entry.id}
+            type="button"
+            onClick={() => callDriver(driverId, entry.id)}
+            title={`${entry.hint} ${entry.effect}`}
+            className={cx(
+              'rounded-md border border-carbon-600 bg-carbon-800/60 py-1',
+              'text-[8.5px] font-bold tracking-wider text-chrome-400 uppercase',
+              'transition-colors hover:border-neon-cyan/50 hover:text-neon-cyan',
+            )}
+          >
+            {entry.label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -445,6 +537,7 @@ export function RadioPanel({ className }: { className?: string }) {
               </button>
 
               <ConditionStrip car={car} wearScale={snapshot.tyreWearScale} />
+              <DriverState driverId={driver.id} />
 
               {/* Tyre change */}
               <div className="mt-2.5 rounded-md border border-carbon-600/70 bg-carbon-800/40 p-2.5">
@@ -673,11 +766,14 @@ export function RadioPanel({ className }: { className?: string }) {
       <div className="mt-3 border-t border-carbon-600/60 pt-3">
         <p className="eyebrow mb-2">Driver Radio</p>
         <div className="max-h-[220px] space-y-1.5 overflow-y-auto pr-1">
+          {/* The empty state sits outside AnimatePresence: an unkeyed child
+              inside it is kept mounted as an exiting element, so it would
+              linger under the first real message. */}
+          {radio.length === 0 && (
+            <p className="text-[10px] text-chrome-500">The cars have nothing to report yet.</p>
+          )}
           <AnimatePresence initial={false}>
-            {radio.length === 0 ? (
-              <p className="text-[10px] text-chrome-500">The cars have nothing to report yet.</p>
-            ) : (
-              radio.slice(0, 24).map((message) => {
+            {radio.slice(0, 24).map((message) => {
                 const style = SEVERITY_STYLE[message.severity];
                 return (
                   <motion.div
@@ -700,8 +796,7 @@ export function RadioPanel({ className }: { className?: string }) {
                     </div>
                   </motion.div>
                 );
-              })
-            )}
+            })}
           </AnimatePresence>
         </div>
       </div>

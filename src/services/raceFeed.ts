@@ -101,6 +101,13 @@ export interface LocalFeedOptions {
   aiStrategyVariance?: number;
   /** 0-1 how well the AI manages tyres, energy and its moments to attack. */
   aiRacecraft?: number;
+  /** Per-car condition effects, from mood, stress, morale and fitness. */
+  condition?: Record<
+    string,
+    { paceFactor: number; errorMultiplier: number; tyreMultiplier: number; aggression: number }
+  >;
+  /** Per-car push level from the strategy screen. */
+  pushLevel?: Record<string, number>;
   /** How often an immutable snapshot is published to React (ms). */
   snapshotIntervalMs?: number;
 }

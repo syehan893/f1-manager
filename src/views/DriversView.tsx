@@ -8,6 +8,13 @@ import { SegmentedControl } from '@/components/ui/SegmentedControl';
 import { DriverPortrait } from '@/components/ui/DriverPortrait';
 import { driverRating, gridTeamOf } from '@/data/grid2026';
 import { cx, flagEmoji, formatCurrency } from '@/lib/format';
+import {
+  EMOTION_LABEL,
+  EMOTION_TONE,
+  conditionOf,
+  conditionSummary,
+  emotionOf,
+} from '@/game/driverCondition';
 import { useGame } from '@/state/gameContext';
 import type { Driver, DriverAttributes } from '@/types';
 
@@ -301,20 +308,73 @@ export function DriversView() {
 
         <div className="grid gap-4 lg:grid-cols-3">
           <Panel title="Condition" icon={<Heart className="size-3.5" />}>
-            <div className="space-y-3">
-              <StatBar
-                label="Morale"
-                value={selected.morale}
-                color={selected.morale > 70 ? 'var(--color-neon-lime)' : 'var(--color-neon-amber)'}
-              />
-              <StatBar label="Fitness" value={selected.fitness} color="var(--color-neon-blue)" />
-              <StatBar
-                label="Overall rating"
-                value={driverRating(selected)}
-                color={team.color}
-                segmented
-              />
-            </div>
+            {(() => {
+              const condition = conditionOf(state, selected.id);
+              const emotion = emotionOf(condition);
+              const tone = EMOTION_TONE[emotion];
+
+              return (
+                <div className="space-y-3">
+                  {/* The headline: what all four numbers add up to. */}
+                  <div
+                    className="rounded-lg border p-2.5"
+                    style={{
+                      borderColor: `color-mix(in srgb, ${tone} 40%, transparent)`,
+                      background: `color-mix(in srgb, ${tone} 7%, transparent)`,
+                    }}
+                  >
+                    <p
+                      className="text-[12px] font-bold tracking-wide uppercase"
+                      style={{ color: tone }}
+                    >
+                      {EMOTION_LABEL[emotion]}
+                    </p>
+                    <p className="mt-1 text-[10px] leading-relaxed text-chrome-400">
+                      {conditionSummary(condition)}
+                    </p>
+                  </div>
+
+                  <StatBar
+                    label="Mood"
+                    value={condition.mood}
+                    color={
+                      condition.mood > 60
+                        ? 'var(--color-neon-lime)'
+                        : 'var(--color-neon-amber)'
+                    }
+                  />
+                  <StatBar
+                    label="Stress"
+                    value={condition.stress}
+                    color={
+                      condition.stress > 60
+                        ? 'var(--color-neon-red)'
+                        : 'var(--color-neon-violet)'
+                    }
+                  />
+                  <StatBar
+                    label="Morale"
+                    value={condition.morale}
+                    color={
+                      condition.morale > 70
+                        ? 'var(--color-neon-lime)'
+                        : 'var(--color-neon-amber)'
+                    }
+                  />
+                  <StatBar
+                    label="Fitness"
+                    value={condition.fitness}
+                    color="var(--color-neon-blue)"
+                  />
+                  <StatBar
+                    label="Overall rating"
+                    value={driverRating(selected)}
+                    color={team.color}
+                    segmented
+                  />
+                </div>
+              );
+            })()}
           </Panel>
 
           <Panel title="Contract" icon={<FileSignature className="size-3.5" />}>

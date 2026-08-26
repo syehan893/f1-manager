@@ -10,9 +10,11 @@ import { GRID_2026_DRIVERS, GRID_2026_TEAMS, carRating, driverRating } from '../
 import { quoteTransfer } from '../src/game/finance';
 import { seasonScore } from '../src/game/transferMarket';
 import { profileFor } from '../src/game/difficulty';
+import { blankStrategy } from '../src/game/machine';
 import { PARTS, enginePenaltyPlaces, fittedUnit } from '../src/game/carModel';
 import { developmentGain, partLevel } from '../src/game/partDevelopment';
 import { ATTRIBUTE_KEYS, currentRating, prospectToDriver } from '../src/game/driverDevelopment';
+import { blankCondition, conditionEffects, emotionOf } from '../src/game/driverCondition';
 import { currentSeasonRecord } from '../src/game/seasonArchive';
 import { ROLES } from '../src/data/staff';
 import { staffMarket, staffRndEfficiency, vacantRoles } from '../src/game/staffing';
@@ -584,6 +586,185 @@ check('the review hands over to pre-season', state.phase === 'PRE_SEASON');
 
 state = must(state, { type: 'START_SEASON' }, 'start the new season');
 check('the new season begins at the hub', state.phase === 'HUB');
+
+console.log('\n== driver condition ==');
+
+const anyDriver = Object.keys(state.driverConditions)[0]!;
+check(
+  'every driver on the grid has a condition',
+  Object.keys(state.driverConditions).length >= 22,
+  `${Object.keys(state.driverConditions).length} tracked`,
+);
+check(
+  'a fresh condition sits at neutral',
+  emotionOf(blankCondition('x')) === 'FOCUSED',
+);
+
+/* The emotions have to be reachable and distinct, or the whole layer is
+ * decoration. */
+check(
+  'high stress with low mood reads as rattled',
+  emotionOf({ driverId: 'x', morale: 50, fitness: 90, mood: 30, stress: 90 }) === 'RATTLED',
+);
+check(
+  'high stress with high mood reads as fired up',
+  emotionOf({ driverId: 'x', morale: 50, fitness: 90, mood: 85, stress: 90 }) === 'FIRED_UP',
+);
+check(
+  'high mood with low stress reads as confident',
+  emotionOf({ driverId: 'x', morale: 50, fitness: 90, mood: 88, stress: 20 }) === 'CONFIDENT',
+);
+check(
+  'a flattened driver reads as dejected',
+  emotionOf({ driverId: 'x', morale: 30, fitness: 90, mood: 12, stress: 40 }) === 'DEJECTED',
+);
+
+/* The two-sided rule: nothing here is a free upgrade. */
+const firedUp = conditionEffects({ driverId: 'x', morale: 60, fitness: 96, mood: 85, stress: 90 });
+const rattled = conditionEffects({ driverId: 'x', morale: 60, fitness: 96, mood: 25, stress: 90 });
+const settled = conditionEffects({ driverId: 'x', morale: 60, fitness: 96, mood: 60, stress: 30 });
+
+check(
+  'a fired-up driver is quicker than a settled one',
+  firedUp.paceFactor < settled.paceFactor,
+  `${firedUp.paceFactor.toFixed(4)} vs ${settled.paceFactor.toFixed(4)}`,
+);
+check(
+  'and pays for it with mistakes',
+  firedUp.errorMultiplier > settled.errorMultiplier,
+  `×${firedUp.errorMultiplier.toFixed(2)} vs ×${settled.errorMultiplier.toFixed(2)}`,
+);
+check(
+  'a rattled driver is slower and messier',
+  rattled.paceFactor > settled.paceFactor && rattled.errorMultiplier > settled.errorMultiplier,
+  `${rattled.paceFactor.toFixed(4)}s factor, ×${rattled.errorMultiplier.toFixed(2)} error`,
+);
+check(
+  'stress is harder on the tyres',
+  rattled.tyreMultiplier > settled.tyreMultiplier,
+  `×${rattled.tyreMultiplier.toFixed(2)} vs ×${settled.tyreMultiplier.toFixed(2)}`,
+);
+
+/* Saturday has to move them, and in the right direction. The harness has
+ * long since rolled the season over by this point, so the result is built
+ * here rather than borrowed from earlier state. */
+const qualiSubjects = Object.keys(state.driverTeams).slice(0, 2);
+const qualiFixture: GameState = {
+  ...state,
+  phase: 'QUALIFYING',
+  driverConditions: Object.fromEntries(
+    Object.keys(state.driverTeams).map((id) => [id, blankCondition(id)]),
+  ),
+};
+const sharedTeam = state.driverTeams[qualiSubjects[0]!]!;
+const fakeQuali = {
+  season: state.season,
+  round: state.round,
+  trackId: state.calendarTrackIds[0]!,
+  completedAt: new Date().toISOString(),
+  entries: Object.keys(state.driverTeams).map((driverId, index) => ({
+    position: index + 1,
+    driverId,
+    // Put the first two in the same garage so the team-mate comparison bites.
+    teamId: index < 2 ? sharedTeam : state.driverTeams[driverId]!,
+    laps: [],
+    bestLapMs: 90_000 + index * 100,
+    gapToPoleMs: index * 100,
+  })),
+};
+
+const qualified = must(
+  qualiFixture,
+  { type: 'QUALIFYING_COMPLETE', result: fakeQuali },
+  'complete qualifying',
+);
+
+const poleCondition = qualified.driverConditions[qualiSubjects[0]!]!;
+const beatenCondition = qualified.driverConditions[qualiSubjects[1]!]!;
+const lastId = Object.keys(state.driverTeams).slice(-1)[0]!;
+const lastCondition = qualified.driverConditions[lastId]!;
+
+check(
+  'out-qualifying a team-mate lifts a driver',
+  poleCondition.mood > 60 && poleCondition.stress < 30,
+  `mood ${poleCondition.mood}, stress ${poleCondition.stress}`,
+);
+check(
+  'being beaten by a team-mate does the reverse',
+  beatenCondition.mood < poleCondition.mood &&
+    beatenCondition.stress > poleCondition.stress,
+  `beaten: mood ${beatenCondition.mood}, stress ${beatenCondition.stress}`,
+);
+check(
+  'qualifying at the back of the grid deflates a driver',
+  lastCondition.mood < 60 && lastCondition.stress > 30,
+  `mood ${lastCondition.mood}, stress ${lastCondition.stress}`,
+);
+
+/* And the pit wall can move them mid-race. */
+const rattledState: GameState = {
+  ...state,
+  phase: 'RACE_SESSION',
+  driverConditions: {
+    ...state.driverConditions,
+    [anyDriver]: { driverId: anyDriver, morale: 50, fitness: 90, mood: 30, stress: 88 },
+  },
+};
+const reassured = must(
+  rattledState,
+  { type: 'CONDITION_EVENT', driverId: anyDriver, event: 'REASSURED' },
+  'reassure a rattled driver',
+);
+check(
+  'reassuring a driver cuts their stress',
+  reassured.driverConditions[anyDriver]!.stress < 88,
+  `88 -> ${reassured.driverConditions[anyDriver]!.stress}`,
+);
+const demanded = must(
+  rattledState,
+  { type: 'CONDITION_EVENT', driverId: anyDriver, event: 'ORDERED_TO_PUSH' },
+  'demand more',
+);
+check(
+  'demanding more from a rattled driver makes it worse',
+  demanded.driverConditions[anyDriver]!.stress > 88,
+  `88 -> ${demanded.driverConditions[anyDriver]!.stress}`,
+);
+const bogus = transition(rattledState, {
+  type: 'CONDITION_EVENT',
+  driverId: anyDriver,
+  event: 'NOT_A_REAL_EVENT',
+});
+check('an unknown condition event is refused', !bogus.ok, bogus.message);
+
+/* Between rounds everybody drifts back to the middle. */
+const extreme: GameState = {
+  ...state,
+  phase: 'POST_RACE',
+  driverConditions: {
+    ...state.driverConditions,
+    [anyDriver]: { driverId: anyDriver, morale: 20, fitness: 40, mood: 5, stress: 95 },
+  },
+};
+const rested = must(extreme, { type: 'CONTINUE_TO_NEXT_WEEK' }, 'a fortnight off');
+const after = rested.driverConditions[anyDriver]!;
+check(
+  'a fortnight pulls a driver back towards the middle',
+  after.mood > 5 && after.stress < 95 && after.fitness > 40,
+  `mood 5→${after.mood}, stress 95→${after.stress}, fitness 40→${after.fitness}`,
+);
+check(
+  'morale is the slow one and barely moves',
+  after.morale > 20 && after.morale < 40,
+  `20 -> ${after.morale}`,
+);
+
+/* Fuel is gone; push level is the only race instruction left. */
+check(
+  'the race plan carries a push level and no fuel figure',
+  'pushLevel' in blankStrategy('x') && !('fuelLoadKg' in blankStrategy('x')),
+  `keys: ${Object.keys(blankStrategy('x')).join(', ')}`,
+);
 
 console.log('\n== driver careers ==');
 

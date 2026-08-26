@@ -1,6 +1,6 @@
 import { createContext, useContext } from 'react';
 import type { MotionValue } from 'framer-motion';
-import type { RadioMessage } from '@/game/driverRadio';
+import type { PitWallCall, RadioMessage } from '@/game/driverRadio';
 import type {
   CarState,
   Circuit,
@@ -47,6 +47,12 @@ export interface RaceContextValue {
    * call, and the driver will have something to say about it.
    */
   answerRadio: (messageId: string, accepted: boolean) => void;
+  /**
+   * Say something to a driver unprompted. This is the half of a radio a
+   * pit wall actually owns: reassuring a rattled driver, demanding more
+   * from a confident one, and living with the consequences either way.
+   */
+  callDriver: (driverId: string, call: PitWallCall) => void;
 }
 
 export const RaceContext = createContext<RaceContextValue | null>(null);

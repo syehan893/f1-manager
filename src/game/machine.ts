@@ -30,6 +30,14 @@ import {
   seedDriverRecords,
 } from './driverDevelopment';
 import { developAiCars, developAiPreSeason } from './aiDevelopment';
+import {
+  CONDITION_EVENTS,
+  applyConditionEvent,
+  applyRaceFatigue,
+  blankCondition,
+  recoverBetweenRounds,
+} from './driverCondition';
+import type { ConditionEvent } from './driverCondition';
 import { archiveSeason } from './seasonArchive';
 import {
   appointmentFrom,
@@ -165,6 +173,7 @@ const MANAGEMENT_ACTIONS: GameEventType[] = [
   'RELEASE_STAFF',
   'SET_STRATEGY',
   'SET_STARTING_TYRE',
+  'CONDITION_EVENT',
   'SET_SETTINGS',
 ];
 
@@ -179,7 +188,8 @@ export const PHASE_ACTIONS: Record<GamePhase, GameEventType[]> = {
   QUALIFYING: [...MANAGEMENT_ACTIONS, 'QUALIFYING_COMPLETE'],
   RACE_STRATEGY: MANAGEMENT_ACTIONS,
   RACE_COUNTDOWN: [],
-  RACE_SESSION: [],
+  // Condition moves during the race, so this one event is legal in-session.
+  RACE_SESSION: ['CONDITION_EVENT'],
   POST_RACE: MANAGEMENT_ACTIONS,
   // Signing is the whole point of the screen; management stays open so
   // the player can look at the car and the books while they decide.
@@ -304,6 +314,9 @@ export function createNewGame(managerName = 'New Manager'): GameState {
     // neutral starting point: the market is the first thing to fix.
     staff: [],
     driverRecords: seedDriverRecords(GRID_2026_DRIVERS.map((driver) => driver.id)),
+    driverConditions: Object.fromEntries(
+      GRID_2026_DRIVERS.map((driver) => [driver.id, blankCondition(driver.id, driver.morale)]),
+    ),
     prospects: buildProspects(2026),
     seasonArchive: [],
     pendingGridPenalty: 0,
@@ -423,7 +436,6 @@ export function blankStrategy(driverId: string): StrategyPlan {
       { compound: 'MEDIUM', plannedLaps: 8 },
       { compound: 'HARD', plannedLaps: 6 },
     ],
-    fuelLoadKg: 100,
     pushLevel: 3,
     startingCompound: 'MEDIUM',
     confirmedForRound: null,
@@ -488,6 +500,9 @@ function clone(state: GameState): GameState {
     staff: state.staff.map((entry) => ({ ...entry })),
     driverRecords: Object.fromEntries(
       Object.entries(state.driverRecords).map(([key, record]) => [key, { ...record }]),
+    ),
+    driverConditions: Object.fromEntries(
+      Object.entries(state.driverConditions).map(([key, entry]) => [key, { ...entry }]),
     ),
     prospects: state.prospects.map((entry) => ({
       ...entry,
@@ -889,6 +904,39 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
 
     case 'QUALIFYING_COMPLETE': {
       next.qualifying = event.result;
+
+      /* Saturday is the first thing that moves a driver all weekend, and
+       * it moves them hard: being out-qualified by a team-mate is the
+       * comparison every driver actually measures themselves against. */
+      const entries = event.result.entries;
+      for (const entry of entries) {
+        const condition = next.driverConditions[entry.driverId];
+        if (!condition) continue;
+
+        let updated = condition;
+
+        const mate = entries.find(
+          (other) => other.teamId === entry.teamId && other.driverId !== entry.driverId,
+        );
+        if (mate) {
+          updated = applyConditionEvent(
+            updated,
+            entry.position < mate.position ? 'OUT_QUALIFIED_MATE' : 'BEATEN_BY_MATE',
+            // A thrashing hurts more than being pipped.
+            Math.min(1.6, 0.6 + Math.abs(entry.position - mate.position) * 0.18),
+          );
+        }
+
+        /* And where they ended up on the grid in absolute terms — the
+         * front row lifts anybody, the back of it deflates anybody. */
+        if (entry.position <= 3) {
+          updated = applyConditionEvent(updated, 'QUALIFIED_WELL', entry.position === 1 ? 1.4 : 1);
+        } else if (entry.position >= entries.length - 4) {
+          updated = applyConditionEvent(updated, 'QUALIFIED_POORLY');
+        }
+
+        next.driverConditions[entry.driverId] = updated;
+      }
       break;
     }
 
@@ -923,6 +971,18 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         // Choosing the tyre *is* the sign-off for this round.
         confirmedForRound: next.round,
       };
+      break;
+    }
+
+    case 'CONDITION_EVENT': {
+      const condition = next.driverConditions[event.driverId];
+      if (!condition) return refuse('No condition tracked for that driver.');
+      if (!(event.event in CONDITION_EVENTS)) return refuse('Unknown condition event.');
+
+      next.driverConditions[event.driverId] = applyConditionEvent(
+        condition,
+        event.event as ConditionEvent,
+      );
       break;
     }
 
@@ -961,6 +1021,11 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
       // The released driver becomes a free agent rather than vanishing.
       delete next.driverTeams[event.outgoingDriverId];
       next.driverTeams[prospect.id] = next.playerTeamId!;
+
+      if (!next.driverConditions[prospect.id]) {
+        // A junior arrives keen and largely unbothered by anything yet.
+        next.driverConditions[prospect.id] = blankCondition(prospect.id, 82);
+      }
 
       if (!next.driverRecords[prospect.id]) {
         next.driverRecords[prospect.id] = {
@@ -1060,6 +1125,39 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
       next.lastRace = event.result;
       next.standings = applyRaceResult(next.standings, event.result);
 
+      /* The result is the biggest single thing that moves a driver, and
+       * it is judged against the grid slot they started from rather than
+       * against the absolute position — a recovery drive from P18 to P11
+       * is a good day, and a P2 that started on pole is not. */
+      for (const finish of event.result.finishers) {
+        const condition = next.driverConditions[finish.driverId];
+        if (!condition) continue;
+
+        let updated = condition;
+
+        if (finish.status === 'DNF') {
+          updated = applyConditionEvent(updated, 'MECHANICAL_FAILURE');
+        } else {
+          const gained = finish.gridPosition - finish.position;
+          const podium = finish.position <= 3;
+
+          if (podium || gained >= 5) {
+            updated = applyConditionEvent(updated, 'RESULT_EXCELLENT');
+          } else if (finish.points > 0 || gained >= 2) {
+            updated = applyConditionEvent(updated, 'RESULT_GOOD');
+          } else if (gained <= -5) {
+            updated = applyConditionEvent(updated, 'RESULT_TERRIBLE');
+          } else if (gained < 0) {
+            updated = applyConditionEvent(updated, 'RESULT_POOR');
+          }
+        }
+
+        next.driverConditions[finish.driverId] = applyRaceFatigue(
+          updated,
+          event.result.totalLaps,
+        );
+      }
+
       const expected = expectedPositionFor(next, next.playerTeamId);
       next.managerPerformanceScore = updateManagerScore(
         next.managerPerformanceScore,
@@ -1141,6 +1239,12 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
     case 'CONTINUE_TO_NEXT_WEEK': {
       const weeksElapsed = 2;
       next.week += weeksElapsed;
+
+      /* A fortnight away from the circuit pulls everyone back towards
+       * the middle: nobody stays furious, and nobody stays euphoric. */
+      for (const [driverId, condition] of Object.entries(next.driverConditions)) {
+        next.driverConditions[driverId] = recoverBetweenRounds(condition);
+      }
 
       /* Part programmes tick down and fit themselves when ready. Every
        * team runs them, so the grid moves whether or not the player is

@@ -222,6 +222,15 @@ export function applyTransferMoves(state: GameState, moves: TransferMove[]): voi
     }
 
     // A promoted junior needs a career record like anybody else.
+    if (!state.driverConditions[move.incomingDriverId]) {
+      state.driverConditions[move.incomingDriverId] = {
+        driverId: move.incomingDriverId,
+        morale: 82,
+        fitness: 96,
+        mood: 60,
+        stress: 30,
+      };
+    }
     if (!state.driverRecords[move.incomingDriverId]) {
       const prospect = state.prospects.find((entry) => entry.id === move.incomingDriverId);
       if (prospect) {

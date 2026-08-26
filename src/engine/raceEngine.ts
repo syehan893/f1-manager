@@ -270,6 +270,19 @@ interface CarInternal {
   errorCheckedLap: number;
   /** Pace advantage carried off the line, spent over the opening lap. */
   launchGain: number;
+  /** Signed lap-time factor from how the driver is feeling. */
+  moodPace: number;
+  /** Multiplier on lap-to-lap scatter from stress and fatigue. */
+  moodError: number;
+  /** Multiplier on tyre wear from stress and how hard they are pushing. */
+  moodTyre: number;
+  /* The push-level terms, kept so a live condition update can recombine
+   * them without needing to know what the strategy screen chose. */
+  pushPace: number;
+  pushTyre: number;
+  pushEdge: number;
+  /** Aggression from the driver alone, before mood and push. */
+  baseAggression: number;
   lapNoise: number;
   lastOvertakeAtMs: number;
   /** Guards the single lap rollover that happens inside the pit lane. */
@@ -356,6 +369,26 @@ export interface RaceEngineOptions {
    * their driver's radio well.
    */
   aiRacecraft?: number;
+  /**
+   * Per-car condition effects, computed from mood, stress, morale and
+   * fitness. This is what makes the same driver in the same car a
+   * different proposition on two different Sundays.
+   */
+  condition?: Record<
+    string,
+    {
+      paceFactor: number;
+      errorMultiplier: number;
+      tyreMultiplier: number;
+      aggression: number;
+    }
+  >;
+  /**
+   * Per-car push level, 1-5, from the strategy screen. The pit wall's
+   * standing instruction on how hard to race: it buys pace and attacking
+   * intent, and it is paid for in tyres.
+   */
+  pushLevel?: Record<string, number>;
 }
 
 export interface RaceEngine {
@@ -486,6 +519,23 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
     const carDelta = (70 - packageRating) * 0.0016;
 
     const isAi = !manualPit.has(driver.id);
+
+    /* How the driver is feeling, and how hard the pit wall has told them
+     * to race. Both land on the same three levers — pace, mistakes and
+     * tyres — because that is all a driver can actually change. */
+    const condition = options.condition?.[driver.id] ?? {
+      paceFactor: 0,
+      errorMultiplier: 1,
+      tyreMultiplier: 1,
+      aggression: 0,
+    };
+
+    /* Push level 1-5, neutral at 3. Turning it up finds lap time and
+     * eats the tyre for it; turning it down does the reverse. */
+    const push = clamp(options.pushLevel?.[driver.id] ?? 3, 1, 5);
+    const pushEdge = (push - 3) / 2;
+    const pushPace = -pushEdge * 0.0032;
+    const pushTyre = 1 + pushEdge * 0.22;
     const plan = isAi ? strategyFor(packageRating) : { stopBias: 0, compoundBias: 0 };
     const paceFactor =
       1 +
@@ -507,8 +557,15 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
     internals.set(driver.id, {
       driverId: driver.id,
       paceFactor,
-      // A harder AI commits to moves it would otherwise let go.
-      aggression: (attrs.attack / 100) * (isAi ? 0.7 + aiSkill * 0.8 : 1),
+      /* A harder AI commits to moves it would otherwise let go — and so
+       * does a driver who is fired up, or who has been told to race. */
+      aggression: clamp(
+        (attrs.attack / 100) * (isAi ? 0.7 + aiSkill * 0.8 : 1) +
+          condition.aggression * 0.35 +
+          pushEdge * 0.3,
+        0.05,
+        1.6,
+      ),
       // From lights out the stop is planned around 40% distance; joining a
       // race in progress keeps the original "box within a few laps" window.
       /* A stronger AI plans its stop closer to the real optimum and with
@@ -562,6 +619,13 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       duelTargetId: null,
       errorCheckedLap: -1,
       launchGain: 0,
+      moodPace: condition.paceFactor + pushPace,
+      moodError: condition.errorMultiplier,
+      moodTyre: condition.tyreMultiplier * pushTyre,
+      pushPace,
+      pushTyre,
+      pushEdge,
+      baseAggression: (attrs.attack / 100) * (isAi ? 0.7 + aiSkill * 0.8 : 1),
       lapNoise: 0,
       lastOvertakeAtMs: -Infinity,
       pitLapCounted: false,
@@ -755,6 +819,9 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
     if (chaser && chaser.gapToAheadMs > 0 && chaser.gapToAheadMs < DUEL_RANGE_MS * 0.7) {
       factor += DEFENCE_SELF_COST * internal.defence;
     }
+
+    // How the driver is feeling, and how hard they have been told to go.
+    factor += internal.moodPace;
 
     /* The start: a good launch is worth real time through the opening
      * corners, and it is gone by the end of lap one. */
@@ -1132,6 +1199,7 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
         wearScale *
         internal.tyreCare *
         internal.tyreSkill *
+        internal.moodTyre *
         (car.attacking ? PUSH_WEAR_MULTIPLIER : 1);
       car.tyre.wearPct = clamp(car.tyre.wearPct + delta * wearRate, 0, 100);
       car.tyre.temperatureC = clamp(
@@ -1185,7 +1253,10 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
         car.tyre.ageLaps += 1;
         /* Lap-to-lap scatter is the driver, not the car. A metronomic
          * driver repeats the lap; a ragged one gives some of it back. */
-        internal.lapNoise = (rng() - 0.5) * CONSISTENCY_NOISE * (1.15 - internal.consistency);
+        /* Lap-to-lap scatter is the driver, not the car — and a driver
+         * under pressure is a messier driver than the same one settled. */
+        internal.lapNoise =
+          (rng() - 0.5) * CONSISTENCY_NOISE * (1.15 - internal.consistency) * internal.moodError;
 
         /* Power-unit failure: one roll per lap, and only once the unit is
          * genuinely worn. Abusing push and override all race is what puts
@@ -1563,6 +1634,22 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
             ? 'Override armed — deploying everything I have'
             : 'Override off, saving the battery',
         });
+        break;
+      }
+      case 'SET_CONDITION': {
+        const internal = internals.get(cmd.driverId);
+        if (!internal) break;
+        /* Condition moves during a race — a driver is talked down, or
+         * wound up. It has to reach the running engine as a command,
+         * because rebuilding the engine would restart the race. */
+        internal.moodPace = cmd.paceFactor + internal.pushPace;
+        internal.moodError = cmd.errorMultiplier;
+        internal.moodTyre = cmd.tyreMultiplier * internal.pushTyre;
+        internal.aggression = clamp(
+          internal.baseAggression + cmd.aggression * 0.35 + internal.pushEdge * 0.3,
+          0.05,
+          1.6,
+        );
         break;
       }
       case 'CANCEL_PIT': {

@@ -5,7 +5,6 @@ import {
   ClipboardCheck,
   Droplets,
   Flag,
-  Fuel,
   Gauge,
   Plus,
   Route,
@@ -21,13 +20,22 @@ import { TyreBadge } from '@/components/ui/TyreBadge';
 import { GameButton } from '@/components/game/GameButton';
 import { scaledLaps } from '@/game/trackAdapter';
 import { TYRE_MODEL } from '@/engine/raceEngine';
-import { TYRE_COLOR, cx, flagEmoji, formatLapTime } from '@/lib/format';
+import { TYRE_COLOR, cx, flagEmoji } from '@/lib/format';
 import { useGame } from '@/state/gameContext';
 import { unconfirmedDrivers } from '@/game/machine';
 import type { StintPlan, StrategyPlan } from '@/game/types';
 import type { TyreCompound } from '@/types';
 
 const DRY_COMPOUNDS: TyreCompound[] = ['SOFT', 'MEDIUM', 'HARD'];
+
+/** What each notch of the push level actually instructs the driver to do. */
+const PUSH_BRIEF: Record<1 | 2 | 3 | 4 | 5, string> = {
+  1: 'Bring it home. They will not fight for a position and the tyres will last a long way — but anyone behind will come past.',
+  2: 'Manage it. Measured pace, kind on the rubber, and they will let a marginal move go.',
+  3: 'Race normally. No instruction either way; the driver races on instinct.',
+  4: 'Race hard. They will commit to moves and the tyres will feel it.',
+  5: 'Everything. Maximum attack, heavy degradation, and the stress will build all afternoon — a driver held here too long will make a mistake.',
+};
 
 /** Push level 1-5 maps onto a wear multiplier and a pace bonus. */
 function pushFactors(level: number) {
@@ -193,7 +201,6 @@ export function RaceStrategyView() {
       saved ?? {
         driverId: activeDriverId,
         stints: DEFAULT_STINTS.map((stint) => ({ ...stint })),
-        fuelLoadKg: 100,
         pushLevel: 3,
         startingCompound: DEFAULT_STINTS[0]!.compound,
         confirmedForRound: null,
@@ -456,76 +463,61 @@ export function RaceStrategyView() {
         </div>
       </Panel>
 
-      {/* Fuel + push */}
-      <Panel title="Fuel & Engine Mode" icon={<Fuel className="size-3.5" />}>
-        <div className="mb-4">
-          <div className="mb-2 flex items-baseline justify-between">
-            <span className="eyebrow flex items-center gap-1.5">
-              <Fuel className="size-3 text-neon-amber" /> Fuel load
-            </span>
-            <span className="font-mono text-[15px] font-bold text-neon-amber">
-              {draft.fuelLoadKg} kg
-            </span>
-          </div>
-          <input
-            type="range"
-            min={20}
-            max={110}
-            value={draft.fuelLoadKg}
-            onChange={(event) => update({ fuelLoadKg: Number(event.target.value) })}
-            className="w-full"
-            aria-label="Fuel load"
-          />
-          <div className="mt-1 flex justify-between font-mono text-[9px] text-chrome-500">
-            <span>20 kg</span>
-            <span
-              className={cx(
-                draft.fuelLoadKg >= raceLaps * 1.9 ? 'text-neon-lime' : 'text-neon-red',
-              )}
-            >
-              needs {Math.ceil(raceLaps * 1.9)} kg
-            </span>
-            <span>110 kg</span>
-          </div>
+      {/* Race mode */}
+      <Panel title="Race Mode" icon={<Gauge className="size-3.5" />}>
+        <p className="mb-3 text-[11px] leading-relaxed text-chrome-500">
+          A standing instruction on how hard to race, not a lap-time dial. Turning it up makes
+          the driver commit to moves they would otherwise let go — and they pay for it in
+          rubber, in stress, and eventually in mistakes.
+        </p>
+
+        <div className="mb-2 flex items-baseline justify-between">
+          <span className="eyebrow flex items-center gap-1.5">
+            <Gauge className="size-3 text-neon-cyan" /> Push level
+          </span>
+          <span className="font-mono text-[15px] font-bold text-neon-cyan">
+            {draft.pushLevel}/5
+          </span>
+        </div>
+        <input
+          type="range"
+          min={1}
+          max={5}
+          value={draft.pushLevel}
+          onChange={(event) => update({ pushLevel: Number(event.target.value) })}
+          className="w-full"
+          aria-label="Push level"
+        />
+        <div className="mt-1 flex justify-between font-mono text-[9px] text-chrome-500">
+          <span>Conserve</span>
+          <span>Balanced</span>
+          <span>Attack</span>
         </div>
 
-        <div className="border-t border-carbon-600/60 pt-4">
-          <div className="mb-2 flex items-baseline justify-between">
-            <span className="eyebrow flex items-center gap-1.5">
-              <Gauge className="size-3 text-neon-cyan" /> Push level
-            </span>
-            <span className="font-mono text-[15px] font-bold text-neon-cyan">
-              {draft.pushLevel}/5
-            </span>
-          </div>
-          <input
-            type="range"
-            min={1}
-            max={5}
-            value={draft.pushLevel}
-            onChange={(event) => update({ pushLevel: Number(event.target.value) })}
-            className="w-full"
-            aria-label="Push level"
-          />
-          <div className="mt-1 flex justify-between font-mono text-[9px] text-chrome-500">
-            <span>Conserve</span>
-            <span>Balanced</span>
-            <span>Attack</span>
-          </div>
+        <p className="mt-2 rounded-lg border border-carbon-600/70 bg-carbon-900/40 p-2.5 text-[10px] leading-relaxed text-chrome-400">
+          {PUSH_BRIEF[draft.pushLevel as 1 | 2 | 3 | 4 | 5] ?? PUSH_BRIEF[3]}
+        </p>
 
-          <div className="mt-3 grid grid-cols-2 gap-2.5">
-            <div className="rounded-lg border border-carbon-600/70 bg-carbon-900/40 px-3 py-2">
-              <p className="text-[9px] tracking-widest text-chrome-500 uppercase">Tyre wear</p>
-              <p className="mt-0.5 font-mono text-[13px] font-bold text-neon-red">
-                ×{push.wearMultiplier.toFixed(2)}
-              </p>
-            </div>
-            <div className="rounded-lg border border-carbon-600/70 bg-carbon-900/40 px-3 py-2">
-              <p className="text-[9px] tracking-widest text-chrome-500 uppercase">Reference lap</p>
-              <p className="mt-0.5 font-mono text-[13px] font-bold text-chrome-100">
-                {currentTrack ? formatLapTime(currentTrack.lapRecordMs) : '—'}
-              </p>
-            </div>
+        <div className="mt-3 grid grid-cols-3 gap-2">
+          <div className="rounded-lg border border-carbon-600/70 bg-carbon-900/40 px-2.5 py-2">
+            <p className="text-[9px] tracking-widest text-chrome-500 uppercase">Tyre wear</p>
+            <p className="mt-0.5 font-mono text-[13px] font-bold text-neon-red">
+              ×{(1 + ((draft.pushLevel - 3) / 2) * 0.22).toFixed(2)}
+            </p>
+          </div>
+          <div className="rounded-lg border border-carbon-600/70 bg-carbon-900/40 px-2.5 py-2">
+            <p className="text-[9px] tracking-widest text-chrome-500 uppercase">Aggression</p>
+            <p className="mt-0.5 font-mono text-[13px] font-bold text-neon-amber">
+              {((draft.pushLevel - 3) / 2) >= 0 ? '+' : ''}
+              {(((draft.pushLevel - 3) / 2) * 30).toFixed(0)}%
+            </p>
+          </div>
+          <div className="rounded-lg border border-carbon-600/70 bg-carbon-900/40 px-2.5 py-2">
+            <p className="text-[9px] tracking-widest text-chrome-500 uppercase">Lap time</p>
+            <p className="mt-0.5 font-mono text-[13px] font-bold text-neon-lime">
+              {((draft.pushLevel - 3) / 2) > 0 ? '−' : ((draft.pushLevel - 3) / 2) < 0 ? '+' : '±'}
+              {Math.abs(((draft.pushLevel - 3) / 2) * 0.0032 * 92).toFixed(2)}s
+            </p>
           </div>
         </div>
       </Panel>

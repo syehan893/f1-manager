@@ -5,7 +5,7 @@ import { SUZUKA } from '@/data/circuits';
 import { DRIVERS } from '@/data/drivers';
 import { createRaceFeed } from '@/services/raceFeed';
 import { createRadioBrain } from '@/game/driverRadio';
-import type { RadioMessage } from '@/game/driverRadio';
+import type { PitWallCall, RadioMessage } from '@/game/driverRadio';
 import type {
   Circuit,
   Driver,
@@ -65,6 +65,17 @@ export interface RaceProviderProps {
   aiStrategyVariance?: number;
   /** 0-1 how well the AI manages tyres, energy and its moments to attack. */
   aiRacecraft?: number;
+  /** Per-car condition effects, from mood, stress, morale and fitness. */
+  condition?: Record<
+    string,
+    { paceFactor: number; errorMultiplier: number; tyreMultiplier: number; aggression: number }
+  >;
+  /** Per-car push level from the strategy screen. */
+  pushLevel?: Record<string, number>;
+  /** How a driver is feeling, so the radio can speak in their voice. */
+  emotionOf?: (driverId: string) => string;
+  /** Fired when something in the race should move a driver's condition. */
+  onConditionEvent?: (driverId: string, event: string) => void;
   /** Fires once when the leader takes the chequered flag. */
   onFinished?: (snapshot: RaceState) => void;
 }
@@ -89,9 +100,36 @@ export function RaceProvider({
   tyreCare,
   aiStrategyVariance,
   aiRacecraft,
+  condition,
+  pushLevel,
+  emotionOf,
+  onConditionEvent,
   onFinished,
 }: RaceProviderProps) {
   // The feed and the motion channels are created once per session config.
+  /* ---- what defines a session, and what merely configures it --------
+   * Everything the engine needs per car — grid, tyres, reliability, crew,
+   * condition, push level — is derived from the save, so a *new object*
+   * appears on every dispatch. If those were dependencies of the feed,
+   * any action taken during a race would tear the engine down and start
+   * the race again from lights out.
+   *
+   * So they are captured once, at construction. The session itself is
+   * defined by the circuit, the grid and the seed, and only those rebuild
+   * it. Anything that genuinely has to change mid-race goes in as a
+   * command — see `SET_CONDITION` below.
+   * ------------------------------------------------------------------ */
+  const [setup] = useState(() => ({
+    startingTyres,
+    reliability,
+    manualPitDriverIds,
+    carPace,
+    pitCrew,
+    tyreCare,
+    condition,
+    pushLevel,
+  }));
+
   const feed = useMemo(
     () =>
       createRaceFeed({
@@ -101,15 +139,10 @@ export function RaceProvider({
         startLap,
         totalLaps,
         scriptedPass: scriptedPass ?? undefined,
-        startingTyres,
-        reliability,
-        manualPitDriverIds,
-        carPace,
         aiSkill,
-        pitCrew,
-        tyreCare,
         aiStrategyVariance,
         aiRacecraft,
+        ...setup,
       }),
     [
       circuit,
@@ -118,15 +151,10 @@ export function RaceProvider({
       startLap,
       totalLaps,
       scriptedPass,
-      startingTyres,
-      reliability,
-      manualPitDriverIds,
-      carPace,
       aiSkill,
-      pitCrew,
-      tyreCare,
       aiStrategyVariance,
       aiRacecraft,
+      setup,
     ],
   );
 
@@ -156,6 +184,14 @@ export function RaceProvider({
   /* The radio brain listens to the same snapshots React renders from. It
    * is per-session state, not per-render, so it lives in a ref keyed to
    * the feed it is listening to. */
+  /* The brain holds a whole race worth of memory: what each driver has
+   * already said, what has been refused, how long they have been stuck.
+   * Rebuilding it throws all of that away and empties the radio log, so
+   * it must not depend on callbacks whose identity changes.
+   *
+   * Callers derive `emotionOf` from the save, so it is a new function on
+   * every dispatch. The latest one is held in a ref and reached through a
+   * stable wrapper, which keeps the brain alive for the whole session. */
   const brain = useMemo(
     () =>
       createRadioBrain({
@@ -165,6 +201,13 @@ export function RaceProvider({
       }),
     [drivers, radioDriverIds, focusDriverId, seed],
   );
+
+  /* The callers derive these from the save, so they are new functions on
+   * every action. Handing them to the brain through a setter keeps the
+   * brain — and with it the whole session's radio memory — alive. */
+  useEffect(() => {
+    brain.setHooks({ emotionOf, onConditionEvent });
+  }, [brain, emotionOf, onConditionEvent]);
 
   /** The latest snapshot, for commands that need to read it synchronously. */
   const snapshotRef = useRef<RaceState | null>(null);
@@ -246,6 +289,20 @@ export function RaceProvider({
 
   const send = useCallback((command: RaceCommand) => feed.send(command), [feed]);
 
+  /* Condition moves during a race — the pit wall talks a driver down, or
+   * winds them up, and Sunday itself does the rest. Each change is sent
+   * to the running engine as a command so it lands without a rebuild. */
+  const lastCondition = useRef<Record<string, string>>({});
+  useEffect(() => {
+    if (!condition) return;
+    for (const [driverId, effects] of Object.entries(condition)) {
+      const signature = JSON.stringify(effects);
+      if (lastCondition.current[driverId] === signature) continue;
+      lastCondition.current[driverId] = signature;
+      feed.send({ type: 'SET_CONDITION', driverId, ...effects });
+    }
+  }, [condition, feed]);
+
   /**
    * Outstanding requests. One stops being outstanding as soon as it is
    * answered, or as soon as it has been overtaken by events — a driver
@@ -275,6 +332,16 @@ export function RaceProvider({
         }
       }),
     [radio, answered, snapshot],
+  );
+
+  /** The pit wall speaking first, rather than only answering. */
+  const callDriver = useCallback(
+    (driverId: string, pitCall: PitWallCall) => {
+      const current = snapshotRef.current ?? snapshot;
+      const reply = brain.call(driverId, pitCall, current);
+      if (reply) setRadio((log) => [reply, ...log].slice(0, RADIO_LOG_CAP));
+    },
+    [brain, snapshot],
   );
 
   const answerRadio = useCallback(
@@ -330,6 +397,7 @@ export function RaceProvider({
       radio,
       radioRequests,
       answerRadio,
+      callDriver,
     }),
     [
       snapshot,
@@ -344,6 +412,7 @@ export function RaceProvider({
       radio,
       radioRequests,
       answerRadio,
+      callDriver,
     ],
   );
 

@@ -178,7 +178,11 @@ export interface StintPlan {
 export interface StrategyPlan {
   driverId: string;
   stints: StintPlan[];
-  fuelLoadKg: number;
+  /**
+   * 1-5. How hard the driver is asked to race. This is the pit wall's
+   * standing instruction on aggression: it moves their willingness to
+   * attack, what it costs in tyres, and how much stress it builds.
+   */
   pushLevel: number;
   /** The compound the car actually starts the race on. */
   startingCompound: TyreCompound;
@@ -278,6 +282,34 @@ export interface StaffAppointment {
   salary: number;
   countryCode: string;
   hiredInSeason: number;
+}
+
+/* --------------------------- driver condition -------------------------- */
+
+/** The dominant feeling right now. Derived, never stored on its own. */
+export type DriverEmotion =
+  | 'CONFIDENT'
+  | 'FOCUSED'
+  | 'FIRED_UP'
+  | 'FRUSTRATED'
+  | 'RATTLED'
+  | 'DEJECTED';
+
+/**
+ * The part of a driver that moves. Four numbers on different clocks:
+ * morale over a season, mood over a session, stress over a stint, and
+ * fitness over a weekend.
+ */
+export interface DriverCondition {
+  driverId: string;
+  /** 0-100, slow moving. Where they stand with the team. */
+  morale: number;
+  /** 0-100. Physical readiness; drains across a weekend. */
+  fitness: number;
+  /** 0-100, fast moving. Swings on a single session. */
+  mood: number;
+  /** 0-100. Accumulated pressure — this is what makes mistakes. */
+  stress: number;
 }
 
 /* ---------------------------- driver careers --------------------------- */
@@ -444,7 +476,7 @@ export interface RoundRecord {
   pointsScored: number;
 }
 
-export const SAVE_VERSION = 10;
+export const SAVE_VERSION = 11;
 
 export interface GameState {
   /** Bumped when the shape changes; older saves are discarded on load. */
@@ -496,6 +528,8 @@ export interface GameState {
   staff: StaffAppointment[];
   /** Age and form for every driver in the game, updated each off-season. */
   driverRecords: Record<string, DriverRecord>;
+  /** Mood, stress, morale and fitness for every driver on the grid. */
+  driverConditions: Record<string, DriverCondition>;
   /** This season's junior intake. Regenerated every year. */
   prospects: ProspectDriver[];
   /** Completed championships, newest last. */
@@ -536,6 +570,7 @@ export type GameEvent =
   | { type: 'QUALIFYING_COMPLETE'; result: QualifyingResult }
   | { type: 'PROCEED_TO_RACE' }
   | { type: 'SET_STARTING_TYRE'; driverId: string; compound: TyreCompound }
+  | { type: 'CONDITION_EVENT'; driverId: string; event: string }
   | { type: 'CONFIRM_STRATEGY' }
   | { type: 'SIGN_SPONSOR'; sponsorId: string }
   | { type: 'HIRE_STAFF'; candidateId: string }

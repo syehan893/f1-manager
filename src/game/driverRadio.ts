@@ -26,6 +26,8 @@ import type { CarState, Driver, RaceState, TyreCompound } from '@/types';
 
 export type RadioKind =
   | 'BOX_REQUEST'
+  /** Unprompted: how they are feeling, which is information in itself. */
+  | 'MORALE'
   | 'PUSH_REQUEST'
   | 'BOOST_REQUEST'
   | 'ENGINE'
@@ -72,6 +74,7 @@ const TOPIC_COOLDOWN_MS: Record<RadioKind, number> = {
   // Just over a lap, so a driver who is waved off does keep asking, but
   // the pit wall is not answering a card every thirty seconds.
   BOX_REQUEST: 120_000,
+  MORALE: 85_000,
   PUSH_REQUEST: 95_000,
   BOOST_REQUEST: 70_000,
   ENGINE: 70_000,
@@ -244,6 +247,79 @@ const BOOST_ASK = [
   'Battery is good, let me use it now.',
 ] as const;
 
+/* ---------------------------------------------------------------------
+ * How a driver sounds depends on how they feel.
+ *
+ * The same event — a tyre going away, a car in the mirrors — produces a
+ * different sentence from a confident driver than from a rattled one.
+ * This is most of what makes a grid sound like twenty-two people, and it
+ * is also information: a pit wall that listens can hear a driver coming
+ * apart before the lap times show it.
+ * ------------------------------------------------------------------- */
+
+/** Unprompted reports of state, keyed on how they are actually feeling. */
+const EMOTION_LINES: Record<string, readonly string[]> = {
+  CONFIDENT: [
+    'Car feels great. I can do this all day.',
+    'Really happy with the balance — keep it exactly like this.',
+    'I have got more in hand if you need it.',
+  ],
+  FOCUSED: [
+    'All good here. Just getting on with it.',
+    'Nothing to report, car is where I want it.',
+  ],
+  FIRED_UP: [
+    'I want this. Give me the car and I will get it done.',
+    'I am right on the limit and it feels brilliant.',
+    'Do not tell me to back off, not now.',
+  ],
+  FRUSTRATED: [
+    'This is not working. Something has to change.',
+    'I am doing everything I can out here and it is not enough.',
+    'Talk to me — I need something from you.',
+  ],
+  RATTLED: [
+    'I nearly lost it there. I need a moment.',
+    'Too much, this is too much. Give me something to hold on to.',
+    'I cannot keep this up, I am going to make a mistake.',
+  ],
+  DEJECTED: [
+    'What is the point. We are nowhere.',
+    'Whatever you want. It does not matter.',
+    'I have got nothing today.',
+  ],
+};
+
+/** What the pit wall gets back when it tries to settle a driver down. */
+const REASSURE_REPLY: Record<string, readonly string[]> = {
+  RATTLED: [
+    'Okay... okay. Thank you. Give me a lap.',
+    'Yeah. Yeah, I hear you. Resetting.',
+  ],
+  FRUSTRATED: ['Understood. I will get my head back in it.', 'Copy. Sorry, I know.'],
+  DEJECTED: ['...copy.', 'If you say so.'],
+  DEFAULT: ['Appreciated. I am fine.', 'All good, thank you.'],
+};
+
+/** And when it demands more. */
+const DEMAND_REPLY: Record<string, readonly string[]> = {
+  CONFIDENT: ['Understood — pushing now.', 'About time. Watch this.'],
+  FIRED_UP: ['Yes! Now we are talking.', 'Finally. Leave it with me.'],
+  RATTLED: [
+    'I... I will try. I am already on the edge.',
+    'You are asking a lot right now.',
+  ],
+  DEJECTED: ['I will try.', 'Fine.'],
+  DEFAULT: ['Copy, upping the pace.', 'Understood, going for it.'],
+};
+
+/** And when it praises them. */
+const PRAISE_REPLY: readonly string[] = [
+  'Thanks, that means a lot. Head down.',
+  'Appreciate that. Let us finish the job.',
+  'Cheers. Feeling good about this one.',
+];
+
 const HOLD_STATION = [
   'Copy, holding station.',
   'Understood, I will manage it from here.',
@@ -342,11 +418,55 @@ const STAY_OUT_ANGRY = [
 
 /* ============================== the brain ============================= */
 
+/** Things the pit wall can say unprompted, rather than only answering. */
+export type PitWallCall = 'REASSURE' | 'DEMAND' | 'PRAISE' | 'CALM_DOWN';
+
+export const PIT_WALL_CALLS: Array<{
+  id: PitWallCall;
+  label: string;
+  hint: string;
+  /** What it does to the driver, for the button's tooltip. */
+  effect: string;
+}> = [
+  {
+    id: 'REASSURE',
+    label: 'Reassure',
+    hint: 'Talk them down.',
+    effect: 'Cuts stress sharply and lifts mood a little. The main tool for a rattled driver.',
+  },
+  {
+    id: 'DEMAND',
+    label: 'Demand more',
+    hint: 'Tell them to race.',
+    effect:
+      'Lifts aggression and mood, but adds real stress. Superb on a confident driver, dangerous on a rattled one.',
+  },
+  {
+    id: 'PRAISE',
+    label: 'Praise',
+    hint: 'Tell them they are doing well.',
+    effect: 'A solid mood lift and a little morale. Works on anyone, but not twice in a row.',
+  },
+  {
+    id: 'CALM_DOWN',
+    label: 'Settle',
+    hint: 'Ask them to bring it home.',
+    effect: 'Cuts stress and takes the edge off — safer, and slower.',
+  },
+];
+
 export interface RadioBrainOptions {
   drivers: Driver[];
   /** Only these drivers talk — the player runs two cars, not twenty. */
   focusDriverIds: string[];
   seed?: number;
+  /**
+   * How each driver is feeling right now, and a way to move it. The brain
+   * never owns condition — it reads it to decide what a driver says, and
+   * reports back what should change so the save stays the single source.
+   */
+  emotionOf?: (driverId: string) => string;
+  onConditionEvent?: (driverId: string, event: string) => void;
 }
 
 export interface RadioBrain {
@@ -354,10 +474,36 @@ export interface RadioBrain {
   evaluate(state: RaceState): RadioMessage[];
   /** The pit wall answered a box request: produces the driver's reply. */
   answer(driverId: string, accepted: boolean, state: RaceState): RadioMessage | null;
+  /** The pit wall said something unprompted. Returns the driver's reply. */
+  call(driverId: string, call: PitWallCall, state: RaceState): RadioMessage | null;
+  /**
+   * Point the brain at fresher hooks without rebuilding it. The brain
+   * holds a whole race of memory — what has been said, what was refused,
+   * how long a driver has been stuck — so it has to outlive the callbacks
+   * its host derives from a save that changes on every action.
+   */
+  setHooks(hooks: {
+    emotionOf?: (driverId: string) => string;
+    onConditionEvent?: (driverId: string, event: string) => void;
+  }): void;
 }
 
 export function createRadioBrain(options: RadioBrainOptions): RadioBrain {
   const rng = mulberry32(options.seed ?? 7);
+  /* Held mutably so the host can refresh them; see `setHooks`. */
+  let emotionHook = options.emotionOf;
+  let conditionHook = options.onConditionEvent;
+
+  const emotionFor = (driverId: string) => emotionHook?.(driverId) ?? 'FOCUSED';
+  const report = (driverId: string, event: string) => conditionHook?.(driverId, event);
+
+  function setHooks(next: {
+    emotionOf?: (driverId: string) => string;
+    onConditionEvent?: (driverId: string, event: string) => void;
+  }) {
+    emotionHook = next.emotionOf ?? emotionHook;
+    conditionHook = next.onConditionEvent ?? conditionHook;
+  }
   const byId = new Map(options.drivers.map((d) => [d.id, d]));
   const focus = new Set(options.focusDriverIds);
   const memory = new Map<string, DriverMemory>();
@@ -733,6 +879,7 @@ export function createRadioBrain(options: RadioBrainOptions): RadioBrain {
       /* --- 6. traffic ------------------------------------------------ */
       if (mem.trafficMs > TRAFFIC_PATIENCE_MS && topicReady('TRAFFIC')) {
         mem.trafficMs = 0;
+        report(car.driverId, 'STUCK_IN_TRAFFIC');
         const angry = mem.temperament.aggression > 0.6;
         emit(
           make(
@@ -747,10 +894,34 @@ export function createRadioBrain(options: RadioBrainOptions): RadioBrain {
         continue;
       }
 
-      /* --- 7. positions, only worth a word from a talkative driver --- */
+      /* --- 7. how they are feeling -----------------------------------
+       * A driver coming apart says so before the lap times show it, and
+       * a driver who is flying says that too. This is the pit wall's
+       * early warning, and its cue to pick up the microphone. */
+      const emotion = emotionFor(car.driverId);
+      if (emotion !== 'FOCUSED' && topicReady('MORALE')) {
+        const pool = EMOTION_LINES[emotion];
+        if (pool) {
+          const urgent = emotion === 'RATTLED' || emotion === 'DEJECTED';
+          emit(
+            make(
+              car,
+              state,
+              'MORALE',
+              urgent ? 'URGENT' : emotion === 'FIRED_UP' ? 'CONCERN' : 'INFO',
+              pickFor(rng, pool, mem.voice),
+            ),
+          );
+          mem.lastPosition = car.position;
+          continue;
+        }
+      }
+
+      /* --- 8. positions, only worth a word from a talkative driver --- */
       if (car.position !== mem.lastPosition && topicReady('POSITION')) {
         const gained = car.position < mem.lastPosition;
         const worthSaying = gained ? mem.temperament.vocal > 0.4 : mem.temperament.vocal > 0.55;
+        report(car.driverId, gained ? 'OVERTAKE_MADE' : 'OVERTAKEN');
         if (worthSaying && !inPit) {
           emit(make(car, state, 'POSITION', 'INFO', pickFor(rng, gained ? GAINED : LOST, mem.voice)));
         }
@@ -772,6 +943,8 @@ export function createRadioBrain(options: RadioBrainOptions): RadioBrain {
     const kind = mem.awaiting;
     mem.awaiting = null;
     mem.lastSpokeAtMs = state.elapsedMs;
+
+    report(driverId, accepted ? 'REQUEST_GRANTED' : 'REQUEST_REFUSED');
 
     if (accepted) {
       if (kind === 'PUSH') {
@@ -807,5 +980,49 @@ export function createRadioBrain(options: RadioBrainOptions): RadioBrain {
     return make(car, state, 'ACK', rattled > 0.75 ? 'URGENT' : 'INFO', pickFor(rng, pool, mem.voice));
   }
 
-  return { evaluate, answer };
+  /**
+   * The pit wall speaking first. This is the other half of a radio: a
+   * manager who can only answer questions is not running anything, and a
+   * driver who can be talked round — or wound up — is a driver the player
+   * has to actually read.
+   */
+  function call(driverId: string, pitCall: PitWallCall, state: RaceState): RadioMessage | null {
+    // Lazily created: the pit wall can speak before the driver has.
+    const mem = memoryFor(driverId);
+    const car = state.cars.find((c) => c.driverId === driverId);
+    if (!mem || !car) return null;
+
+    mem.lastSpokeAtMs = state.elapsedMs;
+    const emotion = emotionFor(driverId);
+
+    switch (pitCall) {
+      case 'REASSURE': {
+        report(driverId, 'REASSURED');
+        const pool = REASSURE_REPLY[emotion] ?? REASSURE_REPLY.DEFAULT!;
+        return make(car, state, 'ACK', 'INFO', pickFor(rng, pool, mem.voice));
+      }
+      case 'DEMAND': {
+        report(driverId, 'ORDERED_TO_PUSH');
+        const pool = DEMAND_REPLY[emotion] ?? DEMAND_REPLY.DEFAULT!;
+        return make(
+          car,
+          state,
+          'ACK',
+          emotion === 'RATTLED' ? 'URGENT' : 'INFO',
+          pickFor(rng, pool, mem.voice),
+        );
+      }
+      case 'PRAISE': {
+        report(driverId, 'PRAISED');
+        return make(car, state, 'ACK', 'INFO', pickFor(rng, PRAISE_REPLY, mem.voice));
+      }
+      case 'CALM_DOWN':
+      default: {
+        report(driverId, 'TOLD_TO_HOLD');
+        return make(car, state, 'ACK', 'INFO', pickFor(rng, HOLD_STATION, mem.voice));
+      }
+    }
+  }
+
+  return { evaluate, answer, call, setHooks };
 }

@@ -4,6 +4,7 @@ import { RaceProvider } from './RaceProvider';
 import { useGame } from './gameContext';
 import { scoreRace } from '@/game/championship';
 import { profileFor } from '@/game/difficulty';
+import { conditionEffects, conditionOf, emotionOf } from '@/game/driverCondition';
 import {
   staffPitCrewBonus,
   staffRacePaceEdge,
@@ -143,6 +144,45 @@ export function CareerRaceProvider({ children }: { children: ReactNode }) {
     [playerDrivers],
   );
 
+  /* How every driver on the grid is feeling, folded into the three levers
+   * the engine understands. Rivals get theirs too, so an AI driver who
+   * has had a torrid weekend races like it. */
+  const condition = useMemo(() => {
+    if (!state) return undefined;
+    return Object.fromEntries(
+      Object.keys(state.driverTeams).map((driverId) => [
+        driverId,
+        conditionEffects(conditionOf(state, driverId)),
+      ]),
+    );
+  }, [state]);
+
+  /** The pit wall's standing instruction on how hard each car races. */
+  const pushLevel = useMemo(() => {
+    if (!state) return undefined;
+    const map: Record<string, number> = {};
+    for (const [driverId, plan] of Object.entries(state.strategies)) {
+      if (state.driverTeams[driverId] !== state.playerTeamId) continue;
+      map[driverId] = plan.pushLevel;
+    }
+    return Object.keys(map).length > 0 ? map : undefined;
+  }, [state]);
+
+  /** What the radio reads to decide how a driver speaks. */
+  const emotionLookup = useCallback(
+    (driverId: string) => emotionOf(conditionOf(state, driverId)),
+    [state],
+  );
+
+  /* Anything the race does to a driver goes back through the machine, so
+   * the save stays the only place condition actually lives. */
+  const handleConditionEvent = useCallback(
+    (driverId: string, conditionEvent: string) => {
+      dispatch({ type: 'CONDITION_EVENT', driverId, event: conditionEvent });
+    },
+    [dispatch],
+  );
+
   const handleFinished = useCallback(
     (finalSnapshot: RaceState) => {
       if (!state?.qualifying || !currentTrack) return;
@@ -199,6 +239,10 @@ export function CareerRaceProvider({ children }: { children: ReactNode }) {
       aiSkill={aiProfile.aiSkill}
       aiStrategyVariance={aiProfile.aiStrategyVariance}
       aiRacecraft={aiProfile.aiRacecraft}
+      condition={condition}
+      pushLevel={pushLevel}
+      emotionOf={emotionLookup}
+      onConditionEvent={handleConditionEvent}
       pitCrew={pitCrew}
       tyreCare={tyreCare}
       onFinished={handleFinished}
