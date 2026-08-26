@@ -3,12 +3,14 @@ import { motion } from 'framer-motion';
 import {
   CheckCircle2,
   ClipboardCheck,
+  CloudRain,
   Droplets,
   Flag,
   Gauge,
   Plus,
   Route,
   Save,
+  Sun,
   Timer,
   Trash2,
 } from 'lucide-react';
@@ -19,6 +21,7 @@ import { TelemetryChart } from '@/components/ui/TelemetryChart';
 import { TyreBadge } from '@/components/ui/TyreBadge';
 import { GameButton } from '@/components/game/GameButton';
 import { scaledLaps } from '@/game/trackAdapter';
+import { DAMP_THRESHOLD, conditionLabel, rollRaceWeather } from '@/game/weather';
 import { TYRE_MODEL } from '@/engine/raceEngine';
 import { TYRE_COLOR, cx, flagEmoji } from '@/lib/format';
 import { useGame } from '@/state/gameContext';
@@ -27,6 +30,7 @@ import type { StintPlan, StrategyPlan } from '@/game/types';
 import type { TyreCompound } from '@/types';
 
 const DRY_COMPOUNDS: TyreCompound[] = ['SOFT', 'MEDIUM', 'HARD'];
+const WET_COMPOUNDS: TyreCompound[] = ['INTER', 'WET'];
 
 /** What each notch of the push level actually instructs the driver to do. */
 const PUSH_BRIEF: Record<1 | 2 | 3 | 4 | 5, string> = {
@@ -84,6 +88,16 @@ function GridSignOff() {
   const gating = phase === 'RACE_STRATEGY';
   const ready = outstanding.length === 0;
 
+  /* The same roll the race itself will use, so what the player is told
+   * here is what actually happens on Sunday. */
+  const weather = currentTrack
+    ? rollRaceWeather(currentTrack, state.season, state.round, raceLaps)
+    : null;
+  const startsWet = (weather?.startWetness ?? 0) >= DAMP_THRESHOLD;
+  /* Wets are only a starting choice if the race actually starts wet —
+   * offering them on a dry Sunday is a trap, not a decision. */
+  const compounds = startsWet ? WET_COMPOUNDS : DRY_COMPOUNDS;
+
   return (
     <Panel
       title={gating ? 'Grid Sign-Off — Required' : 'Grid Sign-Off'}
@@ -107,10 +121,47 @@ function GridSignOff() {
         )
       }
     >
+      {weather && (
+        <div
+          className={cx(
+            'mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border px-3 py-2',
+            startsWet
+              ? 'border-neon-cyan/40 bg-neon-cyan/[0.05]'
+              : 'border-carbon-600 bg-carbon-900/40',
+          )}
+        >
+          <span className="flex items-center gap-1.5 text-[11px] font-bold text-chrome-200">
+            {startsWet ? (
+              <CloudRain className="size-3.5 text-neon-cyan" />
+            ) : (
+              <Sun className="size-3.5 text-neon-amber" />
+            )}
+            {conditionLabel(weather.startWetness)}
+          </span>
+          <span className="font-mono text-[10px] tracking-wider text-chrome-500 uppercase">
+            {weather.airTempC}°C air · {weather.trackTempC}°C track · {weather.windKph} kph
+          </span>
+          <span
+            className={cx(
+              'font-mono text-[10px] tracking-wider uppercase',
+              weather.rainChancePct >= 45 ? 'text-neon-cyan' : 'text-chrome-500',
+            )}
+          >
+            {weather.rainChancePct}% rain risk
+          </span>
+        </div>
+      )}
+
       <p className="mb-3 text-[11px] text-chrome-500">
-        {gating
-          ? `Choose the compound each car starts on. ${raceLaps} laps to run — a soft start buys track position early and costs you a longer second stint.`
-          : 'The starting compound is confirmed here after qualifying, before the grid forms.'}
+        {!gating
+          ? 'The starting compound is confirmed here after qualifying, before the grid forms.'
+          : startsWet
+            ? `It is ${conditionLabel(weather?.startWetness ?? 0).toLowerCase()} out there. ${raceLaps} laps on a wet track — intermediates if it is drying, full wets if it is not.`
+            : `Choose the compound each car starts on. ${raceLaps} laps to run — a soft start buys track position early and costs you a longer second stint.${
+                (weather?.rainChancePct ?? 0) >= 45
+                  ? ' Watch the sky: this one could turn.'
+                  : ''
+              }`}
       </p>
 
       <div className="grid gap-2.5 sm:grid-cols-2">
@@ -155,7 +206,7 @@ function GridSignOff() {
                 onChange={(compound) =>
                   dispatch({ type: 'SET_STARTING_TYRE', driverId: driver.id, compound })
                 }
-                options={DRY_COMPOUNDS.map((compound) => ({
+                options={compounds.map((compound) => ({
                   value: compound,
                   label: compound as string,
                   color: TYRE_COLOR[compound],

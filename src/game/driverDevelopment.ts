@@ -125,7 +125,12 @@ function shiftAttributes(
  * generated, with their current age and form applied.
  */
 export function effectiveDriver(state: GameState | null, driverId: string): Driver | undefined {
-  const prospect = state?.prospects.find((entry) => entry.id === driverId);
+  /* Look in the intake *and* among the graduates: once a junior signs,
+   * the intake they came from is rebuilt every season, and a driver who
+   * cannot be resolved here never ages and never develops. */
+  const prospect =
+    state?.prospects.find((entry) => entry.id === driverId) ??
+    state?.academyDrivers.find((entry) => entry.id === driverId);
   const base: Driver | undefined = prospect
     ? prospectToDriver(prospect)
     : DRIVER_BY_ID[driverId];
@@ -147,7 +152,124 @@ export function currentRating(state: GameState | null, driverId: string): number
   return driver ? driverRating(driver) : 50;
 }
 
+/* --------------------------- the other two ----------------------------- */
+
+/**
+ * The lap time a driver gives away for being somewhere new.
+ *
+ * `adaptability` was seeded, aged and shown on every driver card without
+ * ever being read. This is its job: a driver at a circuit they have never
+ * raced, or in their first season at all, is not yet on the pace, and how
+ * quickly they get there is the attribute. It makes signing a rookie
+ * mid-season cost something real rather than being a pure discount.
+ *
+ * Returns a signed lap-time factor — positive is slower — on the same
+ * scale the engine's condition channel already uses.
+ */
+export function driverAdaptationPenalty(
+  state: GameState | null,
+  driverId: string,
+  trackId: string,
+): number {
+  if (!state) return 0;
+
+  const driver = effectiveDriver(state, driverId);
+  if (!driver) return 0;
+
+  const raced = state.history.some((round) => round.trackId === trackId);
+  const record = state.driverRecords[driverId];
+  const rookieSeason = (record?.seasonsRun ?? 0) === 0;
+
+  if (raced && !rookieSeason) return 0;
+
+  /* 70 is neutral: a 95 barely notices a new circuit, a 45 needs a race
+   * to get on terms with it. */
+  const adaptability = driver.attributes.adaptability;
+  const resistance = Math.max(0.15, 1 - (adaptability - 70) / 55);
+
+  const unfamiliarTrack = raced ? 0 : 0.0026;
+  const firstSeason = rookieSeason ? 0.0022 : 0;
+
+  return (unfamiliarTrack + firstSeason) * resistance;
+}
+
+/**
+ * How much the driver line-up is worth to the development programme.
+ *
+ * `feedback` is the quality of what the driver can tell the engineers,
+ * and it had no effect on anything. Now it multiplies what a development
+ * cheque actually buys, so a quick driver who cannot describe the car
+ * genuinely slows the whole team down — which is a real trade-off to
+ * weigh against raw pace on the driver market.
+ */
+export function driverFeedbackBonus(state: GameState): number {
+  const ours = Object.entries(state.driverTeams)
+    .filter(([, teamId]) => teamId === state.playerTeamId)
+    .map(([driverId]) => effectiveDriver(state, driverId)?.attributes.feedback ?? 70);
+
+  if (ours.length === 0) return 1;
+  const average = ours.reduce((sum, value) => sum + value, 0) / ours.length;
+  // A 95 pairing buys about a tenth more; a 45 pairing about a tenth less.
+  return Math.max(0.85, Math.min(1.14, 1 + (average - 70) / 210));
+}
+
+/* ------------------------------- ceilings ------------------------------ */
+
+/**
+ * How good this driver can ever get.
+ *
+ * A junior is signed on a stated ceiling and that is now the number that
+ * actually binds: without this, every driver on the grid grew by the same
+ * flat allowance and the headline figure on the academy card — the one
+ * thing the player is asked to gamble on — decided nothing at all.
+ *
+ * Established drivers have no stated potential, so it is derived: what
+ * they are today plus the headroom their age still allows. A 21-year-old
+ * has most of a career in front of them; a 34-year-old has none.
+ */
+export function potentialOf(state: GameState | null, driverId: string): number {
+  const graduate =
+    state?.academyDrivers.find((entry) => entry.id === driverId) ??
+    state?.prospects.find((entry) => entry.id === driverId);
+  if (graduate) return graduate.potential;
+
+  const driver = DRIVER_BY_ID[driverId];
+  if (!driver) return 99;
+
+  const base = driverRating(driver);
+  const age = state?.driverRecords[driverId]?.age ?? driver.age;
+  const headroom = age <= 21 ? 12 : age <= 24 ? 8 : age <= 27 ? 5 : age <= 30 ? 2 : 0;
+  return Math.min(99, base + headroom);
+}
+
+/**
+ * What the scouts will commit to, as a range rather than a number.
+ *
+ * A ceiling nobody can measure is the whole risk of signing a teenager,
+ * so the report narrows as they actually run races instead of being
+ * handed over precise on day one.
+ */
+export function scoutedRange(
+  state: GameState | null,
+  driverId: string,
+): { low: number; high: number; certainty: number } {
+  const potential = potentialOf(state, driverId);
+  const seasons = state?.driverRecords[driverId]?.seasonsRun ?? 0;
+  /* Two full seasons of racing is what it takes to be sure. */
+  const certainty = Math.min(1, seasons / 2);
+  const spread = Math.round(9 * (1 - certainty));
+  /* The error is deterministic per driver, so a reload cannot re-scout. */
+  const lean = (seeded(0, driverId + 'scout') - 0.5) * 2 * spread * 0.45;
+  return {
+    low: Math.max(40, Math.round(potential - spread + lean)),
+    high: Math.min(99, Math.round(potential + spread + lean)),
+    certainty,
+  };
+}
+
 /* ------------------------------ progression ---------------------------- */
+
+const clampUnit = (value: number) => Math.max(0, Math.min(1, value));
 
 /** Deterministic per (season, driver), so a reload cannot reroll a career. */
 function seeded(season: number, driverId: string): number {
@@ -205,6 +327,13 @@ export function advanceDriverSeason(state: GameState): DevelopmentNote[] {
      * raw speed has turned over. */
     const mileage = Math.min(1, record.seasonsRun / 8);
 
+    /* What is left between what they are and what they can become. Growth
+     * fades out as a driver closes on their own ceiling, which is what
+     * makes the number on the academy card a real promise rather than
+     * decoration. Decline is untouched — age takes what it takes. */
+    const ceiling = potentialOf(state, record.driverId);
+    const headroom = clampUnit((ceiling - currentRating(state, record.driverId)) / 6);
+
     let biggestGain: DevelopmentNote['biggestGain'] = null;
     let biggestLoss: DevelopmentNote['biggestLoss'] = null;
 
@@ -215,7 +344,7 @@ export function advanceDriverSeason(state: GameState): DevelopmentNote[] {
       let change: number;
       if (record.age <= curve.peakAge) {
         // Still climbing, and climbing faster when the results back it up.
-        change = curve.growth + form * curve.formWeight + noise;
+        change = (curve.growth + form * curve.formWeight) * headroom + noise;
       } else {
         /* Past the peak the loss accelerates, but experience keeps paying
          * into the learned attributes for years afterwards — which is why

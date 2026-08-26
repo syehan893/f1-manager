@@ -773,7 +773,7 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
       /* A transfer is a purchase like any other. The fee for the driver
        * coming in is offset by what the other team pays for the one going
        * the other way, and a strong academy negotiates the balance down. */
-      const quote = quoteTransfer(incomingDriverId, outgoingDriverId);
+      const quote = quoteTransfer(incomingDriverId, outgoingDriverId, next);
       const fee = Math.round(quote.net * academyDiscount(next));
       const team = next.teams.find((entry) => entry.teamId === next.playerTeamId);
       if (!team) return refuse('No team selected.');
@@ -787,7 +787,10 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
       next.driverTeams[incomingDriverId] = next.playerTeamId!;
       next.driverTeams[outgoingDriverId] = incomingTeam;
 
-      const incomingName = DRIVER_BY_ID[incomingDriverId]?.lastName ?? incomingDriverId;
+      const incomingName =
+        DRIVER_BY_ID[incomingDriverId]?.lastName ??
+        next.academyDrivers.find((entry) => entry.id === incomingDriverId)?.lastName ??
+        incomingDriverId;
       post(next, 'TRANSFER', `Signed ${incomingName}`, -fee);
       break;
     }

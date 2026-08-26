@@ -22,6 +22,20 @@ import type {
 
 /* ----------------------------- tuning ------------------------------- */
 
+import {
+  DAMP_THRESHOLD,
+  bestCompoundFor,
+  compoundPaceFactor,
+  compoundRiskFactor,
+  compoundWearFactor,
+  dryWeather,
+  isWetCompound,
+  isWrongTyre,
+  phaseAtLap,
+  stepWetness,
+} from '@/game/weather';
+import type { RaceWeather } from '@/game/weather';
+
 export const TYRE_MODEL: Record<
   TyreCompound,
   { paceFactor: number; wearPerLap: number; warmupLaps: number }
@@ -270,6 +284,13 @@ interface CarInternal {
   errorCheckedLap: number;
   /** Pace advantage carried off the line, spent over the opening lap. */
   launchGain: number;
+  /**
+   * How much of the conditions this driver actually gives back, 0.6 to
+   * 1.4. A wet-weather specialist keeps more of the lap time and makes
+   * fewer of the mistakes; a driver who cannot see in the rain does the
+   * opposite. This is the whole point of the `wetWeather` attribute.
+   */
+  wetSkill: number;
   /** Signed lap-time factor from how the driver is feeling. */
   moodPace: number;
   /** Multiplier on lap-to-lap scatter from stress and fatigue. */
@@ -328,6 +349,12 @@ export interface RaceEngineOptions {
    * box — and the decision to wave it off — mean anything at all.
    */
   manualPitDriverIds?: string[];
+  /**
+   * The sky for this race. Without one the session runs dry, which is
+   * what the standalone demo wants; a career weekend always passes the
+   * forecast its circuit was generated with.
+   */
+  weather?: RaceWeather;
   /**
    * Overrides the automatic wear scaling derived from the race length.
    * Mostly useful for tests that want the unscaled tyre model.
@@ -467,6 +494,11 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
 
   /* --- initial grid ------------------------------------------------- */
 
+  /* The sky. `wetness` is the only number the rest of the engine reads:
+   * how much water is on the track, not what the clouds are doing. */
+  const weather = options.weather ?? dryWeather();
+  let wetness = weather.startWetness;
+
   const aiSkill = clamp(options.aiSkill ?? 0.5, 0, 1);
   const strategyVariance = clamp(options.aiStrategyVariance ?? 0, 0, 1);
   const aiRacecraft = clamp(options.aiRacecraft ?? 0.5, 0, 1);
@@ -544,9 +576,16 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       (isAi ? -aiPaceEdge : 0) +
       (rng() - 0.5) * 0.004;
 
-    const compound: TyreCompound =
+    /* The grid forms on what the track needs. A dry choice made in the
+     * strategy room is honoured on a dry track and quietly overruled on a
+     * wet one — no team starts a wet race on slicks, and a player who
+     * picked mediums on Saturday should not be punished for weather that
+     * arrived on Sunday. */
+    const chosen: TyreCompound =
       options.startingTyres?.[driver.id] ??
       (index % 3 === 0 && index < 6 ? 'SOFT' : 'MEDIUM');
+    const compound: TyreCompound =
+      wetness >= DAMP_THRESHOLD ? bestCompoundFor(wetness, chosen) : chosen;
 
     // 50 reliability is the neutral car; 99 roughly halves the rate of
     // consumption, 20 roughly doubles it.
@@ -607,6 +646,9 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       compoundBias: plan.compoundBias,
       // A car the player runs has no AI racecraft: that is the player's job.
       racecraft: isAi ? aiRacecraft : 0,
+      /* Centred on 70 so an average driver is neutral: a 95 keeps about a
+       * third of what the conditions take, a 45 gives back a third more. */
+      wetSkill: clamp(1 - (attrs.wetWeather - 70) / 62, 0.6, 1.4),
       attack: attrs.attack / 100,
       defence: attrs.defence / 100,
       judgement: attrs.racecraft / 100,
@@ -655,8 +697,14 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       // (raceDistance is recomputed each tick as lap + progress + gridOffset)
       gapToLeaderMs: gapSeconds * 1000,
       gapToAheadMs: index === 0 ? 0 : 700 + rng() * 900,
-      lastLapMs: circuit.baseLapTimeMs * paceFactor,
-      bestLapMs: circuit.baseLapTimeMs * paceFactor * 0.996,
+      lastLapMs: fromGrid ? null : circuit.baseLapTimeMs * paceFactor,
+      /* Only a race joined in progress has laps behind it. A standing
+       * start must begin with nothing: seeding a plausible-looking best
+       * lap here made it permanently unbeatable, because it was pitched
+       * quicker than a real lap and `Math.min` never let a real one
+       * through. The fastest-lap point went to whoever had the best car
+       * on paper, and no condition on track could ever change it. */
+      bestLapMs: fromGrid ? null : circuit.baseLapTimeMs * paceFactor * 1.004,
       currentLapMs: START_PROGRESS * circuit.baseLapTimeMs,
       tyre: {
         compound,
@@ -725,7 +773,12 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
 
   for (const car of cars) {
     const samples: TelemetrySample[] = [];
-    const wearPerLap = TYRE_MODEL[car.tyre.compound].wearPerLap * wearScale;
+    /* Water cools a tyre. A wet on a drying track destroys itself, and a
+     * slick in the rain barely wears at all because it is not gripping. */
+    const wearPerLap =
+      TYRE_MODEL[car.tyre.compound].wearPerLap *
+      wearScale *
+      compoundWearFactor(car.tyre.compound, wetness);
     const lapsPerSecond = 1000 / circuit.baseLapTimeMs;
 
     for (let k = SEED_SAMPLES; k > 0; k--) {
@@ -757,12 +810,13 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
     speedMultiplier: 1,
     elapsedMs: startLap * circuit.baseLapTimeMs,
     weather: {
-      kind: 'DRY',
-      airTempC: 24,
-      trackTempC: 41,
-      humidityPct: 48,
-      rainChancePct: 12,
-      windKph: 9,
+      kind: phaseAtLap(weather, startLap).kind,
+      airTempC: weather.airTempC,
+      trackTempC: weather.trackTempC,
+      humidityPct: Math.round(40 + wetness * 55),
+      rainChancePct: weather.rainChancePct,
+      windKph: weather.windKph,
+      wetness,
     },
     cars,
     overtakes: [],
@@ -787,8 +841,17 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
     // Fuel weight: ~0.032s per kg over a 92s lap.
     const fuelPenalty = car.fuelKg * 0.00035;
 
+    /* The conditions. A tyre outside its window is the single largest
+     * term in this whole function — a slick on a wet track is not a
+     * tenth off, it is seconds off, and it should read that way. A
+     * wet-weather driver gives less of it back. */
+    const conditionPenalty =
+      (compoundPaceFactor(car.tyre.compound, wetness) - 1) * internal.wetSkill;
+
     let factor =
-      internal.paceFactor * tyre.paceFactor * (1 + wearPenalty + fuelPenalty + warmup);
+      internal.paceFactor *
+      tyre.paceFactor *
+      (1 + wearPenalty + fuelPenalty + warmup + conditionPenalty);
 
     // DRS: needs a zone and a car within a second.
     if (ahead && car.gapToAheadMs > 0 && car.gapToAheadMs < 1000) {
@@ -860,6 +923,14 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
   }
 
   function beginPitStop(car: CarState, internal: CarInternal) {
+    /* Whatever the plan said, the crew fits what the track needs. Nobody
+     * bolts on slicks in a downpour because it was written down before
+     * the race — and the reverse matters just as much, since a car that
+     * stays on wets after a track dries has thrown the race away. */
+    /* On a dry track this returns their own planned compound untouched,
+     * so a deliberate soft-versus-hard call still stands. */
+    internal.nextCompound = bestCompoundFor(wetness, internal.nextCompound);
+
     car.status = 'PIT_ENTRY';
     car.pitProgress = 0;
     internal.pitTimerMs = 0;
@@ -902,7 +973,11 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       message: `Stationary ${(internal.pitStationaryMs / 1000).toFixed(1)}s — ${car.tyre.compound.toLowerCase()} fitted`,
     });
 
-    internal.nextCompound = internal.nextCompound === 'SOFT' ? 'MEDIUM' : 'HARD';
+    /* The dry rotation only applies to dry tyres; a wet stop leaves the
+     * next choice to the conditions at the time. */
+    if (!isWetCompound(internal.nextCompound)) {
+      internal.nextCompound = internal.nextCompound === 'SOFT' ? 'MEDIUM' : 'HARD';
+    }
   }
 
   /** The car crosses the pit exit line and rejoins the circuit. */
@@ -1246,6 +1321,27 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
         }
 
         car.lap += 1;
+
+        /* The sky moves with the leader, so the track is one shared thing
+         * rather than twenty-two private ones. Rain arrives roughly three
+         * times faster than a track dries, which is what makes a change
+         * of conditions a scramble one way and a long gamble the other. */
+        if (car.position === 1) {
+          const phase = phaseAtLap(weather, car.lap);
+          const next = stepWetness(wetness, phase.targetWetness);
+          if (next !== wetness) {
+            wetness = next;
+            state.weather = {
+              ...state.weather,
+              kind: phase.kind,
+              wetness,
+              humidityPct: Math.round(40 + wetness * 55),
+            };
+          } else if (state.weather.kind !== phase.kind) {
+            state.weather = { ...state.weather, kind: phase.kind };
+          }
+        }
+
         car.lastLapMs = car.currentLapMs;
         car.bestLapMs =
           car.bestLapMs == null ? car.currentLapMs : Math.min(car.bestLapMs, car.currentLapMs);
@@ -1256,7 +1352,15 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
         /* Lap-to-lap scatter is the driver, not the car — and a driver
          * under pressure is a messier driver than the same one settled. */
         internal.lapNoise =
-          (rng() - 0.5) * CONSISTENCY_NOISE * (1.15 - internal.consistency) * internal.moodError;
+          (rng() - 0.5) *
+          CONSISTENCY_NOISE *
+          (1.15 - internal.consistency) *
+          internal.moodError *
+          /* The wrong tyre in the wet is the most dangerous thing in the
+           * model, and it belongs in the scatter rather than hidden in
+           * the lap time — a driver on slicks in the rain should be
+           * visibly all over the road. */
+          (1 + (compoundRiskFactor(car.tyre.compound, wetness) - 1) * internal.wetSkill);
 
         /* Power-unit failure: one roll per lap, and only once the unit is
          * genuinely worn. Abusing push and override all race is what puts
@@ -1324,9 +1428,17 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       /* A sharper AI reacts to the tyre in front of it rather than only
        * to the number it wrote down before the race. */
       const wearTrigger = 92 - internal.racecraft * 14;
+      /* Conditions override every other reason to stop. A car on the
+       * wrong tyre for the track is losing seconds a lap and is about to
+       * put it in the wall, so it comes in whatever the plan said — a
+       * sharper team spots the change a little sooner. */
+      const strandedOnWrongTyre =
+        isWrongTyre(car.tyre.compound, wetness) &&
+        car.lap > startLap + (1 - internal.racecraft);
       const wantsPit = manualPit.has(car.driverId)
         ? internal.plannedPitLaps.includes(car.lap)
-        : internal.plannedPitLaps.includes(car.lap) ||
+        : strandedOnWrongTyre ||
+          internal.plannedPitLaps.includes(car.lap) ||
           car.tyre.wearPct > wearTrigger ||
           car.fuelKg < 3;
       if (

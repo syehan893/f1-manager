@@ -1,5 +1,7 @@
 import { PARTS, POWER_UNIT_PARTS, fittedUnit } from './carModel';
 import { conditionOf, emotionOf } from './driverCondition';
+import { DAMP_THRESHOLD, bestCompoundFor, conditionLabel } from './weather';
+import type { RaceWeather } from './weather';
 import { activeContracts } from './finance';
 import { effectiveRating } from './staffing';
 import { ROLES } from '@/data/staff';
@@ -182,6 +184,42 @@ const PUSH_LOW = [
   'I will manage it, but somebody will come past and stay past.',
 ] as const;
 
+const WET_STRONG_NOW = [
+  'Rain suits me. Give me the right tyre and I will make places up out there.',
+  'This is my kind of afternoon. Get the call right and I will do the rest.',
+  'Good. Everybody else hates this — I do not.',
+] as const;
+
+const WET_STRONG_LATER = [
+  'If it rains I want to be out there. That is where I make the difference.',
+  'Bring on the rain. I will take my chances against this lot in the wet.',
+  'Watch that sky for me. If it turns, it turns our way.',
+] as const;
+
+const WET_WEAK_NOW = [
+  'I struggle in the wet, I am not going to pretend otherwise. Be patient early on.',
+  'This is not my afternoon. Talk me through it and I will bring it home.',
+  'I have no confidence in these conditions. Keep the calls simple.',
+] as const;
+
+const WET_WEAK_LATER = [
+  'If that rain arrives I will need a lap or two before I can lean on it.',
+  'I would rather this stayed dry, if I am honest with you.',
+  'Rain is the one thing that could undo our weekend. Warn me early.',
+] as const;
+
+const WET_EVEN_NOW = [
+  'Wet track. Just get the tyre call right and I will do the rest.',
+  'It is treacherous out there. Nothing clever — get the basics right.',
+  'Fine. Right tyre, clean stops, and we will be in the mix.',
+] as const;
+
+const WET_EVEN_LATER = [
+  'Keep me posted on the rain. I do not want to be the last one to know.',
+  'If it starts spitting, call it early. I would rather box a lap too soon.',
+  'Eyes on the radar for me. That is the race, not the strategy sheet.',
+] as const;
+
 const GRID_GOOD = [
   'Starting P{p}. That is a real chance — do not waste it on the pit wall.',
   'P{p} is where we should be. Now we convert it.',
@@ -206,7 +244,12 @@ function fill(template: string, values: Record<string, string>): string {
  * What one driver has to say before the race. At most three lines each —
  * a driver who says everything says nothing.
  */
-function driverPreRace(state: GameState, driver: Driver, used: Set<string>): BriefingLine[] {
+function driverPreRace(
+  state: GameState,
+  driver: Driver,
+  used: Set<string>,
+  weather?: RaceWeather,
+): BriefingLine[] {
   const condition = conditionOf(state, driver.id);
   const emotion = emotionOf(condition);
   const plan = planFor(state, driver.id);
@@ -242,6 +285,31 @@ function driverPreRace(state: GameState, driver: Driver, used: Set<string>): Bri
       label: 'Driver condition',
       view: 'drivers',
     });
+  }
+
+  /* The weather, in their own terms. A wet-weather driver is quietly
+   * delighted by a forecast that frightens everybody else, and that is
+   * the most useful thing they can tell the pit wall all weekend. */
+  if (weather && (weather.startWetness >= DAMP_THRESHOLD || weather.phases.length > 1)) {
+    const wet = driver.attributes.wetWeather;
+    const soon = weather.startWetness >= DAMP_THRESHOLD;
+    const pool =
+      wet >= 82
+        ? soon
+          ? WET_STRONG_NOW
+          : WET_STRONG_LATER
+        : wet <= 58
+          ? soon
+            ? WET_WEAK_NOW
+            : WET_WEAK_LATER
+          : soon
+            ? WET_EVEN_NOW
+            : WET_EVEN_LATER;
+    say(
+      'STRATEGY',
+      wet >= 82 ? 'GOOD' : wet <= 58 ? 'WARN' : 'NEUTRAL',
+      pickFresh(pool, seed + 'wet', used),
+    );
   }
 
   /* The tyre they have been given. */
@@ -295,7 +363,11 @@ function driverPreRace(state: GameState, driver: Driver, used: Set<string>): Bri
  * The strategist is on every briefing: they own the plan, so if the plan
  * is thin that is the first thing the player should hear.
  */
-function strategistPreRace(state: GameState, drivers: Driver[]): BriefingLine | null {
+function strategistPreRace(
+  state: GameState,
+  drivers: Driver[],
+  weather?: RaceWeather,
+): BriefingLine | null {
   const appointment = appointmentFor(state, 'STRATEGIST');
   const base = {
     id: 'pre:staff:STRATEGIST',
@@ -305,13 +377,47 @@ function strategistPreRace(state: GameState, drivers: Driver[]): BriefingLine | 
     topic: 'STRATEGY' as const,
   };
 
+  const wetDay = weather
+    ? weather.startWetness >= DAMP_THRESHOLD || weather.phases.length > 1
+    : false;
+
   if (!appointment) {
     return {
       ...base,
       tone: 'BAD',
-      text: 'Nobody is running strategy. The stops are being called off the cuff, and it shows on a Sunday.',
+      /* On a wet day the vacancy and the conditions are the same problem,
+       * so they belong in one line rather than the weather being lost
+       * behind the hiring note. */
+      text: wetDay
+        ? `Nobody is running strategy, and this one is ${conditionLabel(weather!.startWetness).toLowerCase()} with ${weather!.rainChancePct}% on the board. Tyre calls in these conditions decide the race, and we are guessing at them.`
+        : 'Nobody is running strategy. The stops are being called off the cuff, and it shows on a Sunday.',
       action: { label: 'Hire a strategist', view: 'staff' },
     };
+  }
+
+  /* Nothing on the pit wall matters more than the sky. If the race is
+   * wet, or might turn, the strategist says so before anything else. */
+  if (weather && wetDay) {
+    const startsWet = weather.startWetness >= DAMP_THRESHOLD;
+    const turns = weather.phases.length > 1;
+    if (startsWet) {
+      return {
+        ...base,
+        tone: 'WARN',
+        text: turns
+          ? `${conditionLabel(weather.startWetness)} to start and it is forecast to improve. Whoever calls the switch to slicks at the right lap wins this race.`
+          : `${conditionLabel(weather.startWetness)} out there and staying that way. ${bestCompoundFor(weather.startWetness) === 'WET' ? 'Full wets' : 'Intermediates'} from the grid, and expect the order to look nothing like qualifying.`,
+        action: { label: 'Race strategy', view: 'race-strategy' },
+      };
+    }
+    if (turns) {
+      return {
+        ...base,
+        tone: 'WARN',
+        text: `Dry now, but there is rain in this one — ${weather.rainChancePct}% on the board. I want wets ready and somebody watching the radar all afternoon.`,
+        action: { label: 'Race strategy', view: 'race-strategy' },
+      };
+    }
   }
 
   const plans = drivers.map((driver) => planFor(state, driver.id)).filter(Boolean) as StrategyPlan[];
@@ -487,10 +593,14 @@ function technicalPreRace(state: GameState): BriefingLine[] {
  * Everything the team has to say before the grid forms. The strategist
  * and the principal are always here; everyone else earned their place.
  */
-export function preRaceBriefing(state: GameState, drivers: Driver[]): BriefingLine[] {
+export function preRaceBriefing(
+  state: GameState,
+  drivers: Driver[],
+  weather?: RaceWeather,
+): BriefingLine[] {
   const lines: BriefingLine[] = [];
 
-  const strategist = strategistPreRace(state, drivers);
+  const strategist = strategistPreRace(state, drivers, weather);
   if (strategist) lines.push(strategist);
 
   const principal = principalPreRace(state);
@@ -500,7 +610,7 @@ export function preRaceBriefing(state: GameState, drivers: Driver[]): BriefingLi
 
   /* Shared so two team-mates never draw the same sentence. */
   const used = new Set<string>();
-  for (const driver of drivers) lines.push(...driverPreRace(state, driver, used));
+  for (const driver of drivers) lines.push(...driverPreRace(state, driver, used, weather));
 
   return lines;
 }

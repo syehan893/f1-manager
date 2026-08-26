@@ -1,5 +1,6 @@
 import { DRIVER_BY_ID } from '@/data/drivers';
 import { driverRating } from '@/data/grid2026';
+import { prospectToDriver } from './driverDevelopment';
 import { SPONSORS, TIER_SLOTS, sponsorById } from '@/data/sponsors';
 import type { Sponsor, SponsorTier } from '@/data/sponsors';
 import type { GameState, LedgerEntry, LedgerKind, RaceResult, SponsorContract } from './types';
@@ -302,13 +303,23 @@ export interface TransferQuote {
   wageDelta: number;
 }
 
+/** An academy graduate as a full driver, so the market can price them. */
+function academyDriverOf(state: GameState | undefined, driverId: string) {
+  const prospect = state?.academyDrivers.find((entry) => entry.id === driverId);
+  return prospect ? prospectToDriver(prospect) : undefined;
+}
+
 /**
  * A driver's market valuation. Ability dominates, but a 20-year-old with
  * the same rating as a 36-year-old is worth considerably more, because a
  * buyer is paying for the seasons ahead as well as the one in hand.
  */
-export function driverValuation(driverId: string): number {
-  const driver = DRIVER_BY_ID[driverId];
+export function driverValuation(driverId: string, state?: GameState): number {
+  /* A junior who has come through the academy is not in the 2026 data
+   * file. Without the save to look in they valued at the floor, which
+   * meant a promoted driver could be bought back for nothing however
+   * good they had become. */
+  const driver = DRIVER_BY_ID[driverId] ?? academyDriverOf(state, driverId);
   if (!driver) return MIN_TRANSFER_FEE;
 
   const rating = driverRating(driver);
@@ -332,12 +343,15 @@ export function driverValuation(driverId: string): number {
 export function quoteTransfer(
   incomingDriverId: string,
   outgoingDriverId: string,
+  state?: GameState,
 ): TransferQuote {
-  const incomingFee = driverValuation(incomingDriverId);
-  const outgoingFee = Math.round(driverValuation(outgoingDriverId) * TRANSFER_SELL_ON_RATE);
+  const incomingFee = driverValuation(incomingDriverId, state);
+  const outgoingFee = Math.round(
+    driverValuation(outgoingDriverId, state) * TRANSFER_SELL_ON_RATE,
+  );
 
-  const incoming = DRIVER_BY_ID[incomingDriverId];
-  const outgoing = DRIVER_BY_ID[outgoingDriverId];
+  const incoming = DRIVER_BY_ID[incomingDriverId] ?? academyDriverOf(state, incomingDriverId);
+  const outgoing = DRIVER_BY_ID[outgoingDriverId] ?? academyDriverOf(state, outgoingDriverId);
   const wageDelta =
     (incoming?.contract.salaryPerSeason ?? 0) - (outgoing?.contract.salaryPerSeason ?? 0);
 

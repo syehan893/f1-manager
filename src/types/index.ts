@@ -250,6 +250,12 @@ export interface Telemetry {
 
 export interface Weather {
   kind: WeatherKind;
+  /**
+   * How much water is on the track, 0 (bone dry) to 1 (standing water).
+   * This is the number the tyre model actually reads — `kind` is what the
+   * player is told, `wetness` is what the car feels.
+   */
+  wetness: number;
   airTempC: number;
   trackTempC: number;
   humidityPct: number;

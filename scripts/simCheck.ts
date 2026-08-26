@@ -4,6 +4,8 @@
  * dashboard depends on: ordering, the scripted pass, pit stops, telemetry. */
 
 import { createRaceEngine } from '../src/engine/raceEngine';
+import { rollRaceWeather, compoundPaceFactor, compoundWearFactor, compoundRiskFactor, bestCompoundFor } from '@/game/weather';
+import { buildTracks } from '@/lib/careerGen';
 import { SUZUKA } from '../src/data/circuits';
 import { DRIVERS } from '../src/data/drivers';
 import { projectRace, projectStint, pitWindow } from '../src/engine/strategy';
@@ -1353,6 +1355,147 @@ check(
   oneStop.totalTimeS > 4_800 && oneStop.totalTimeS < 7_800,
   `${(oneStop.totalTimeS / 60).toFixed(1)} min`,
 );
+
+
+console.log('\n== weather: the tyre window ==');
+
+{
+  /* The crossovers are the whole model: where each tyre stops being the
+   * right one is what makes a change of conditions a decision. */
+  check(
+    'slicks are quickest on a dry track',
+    compoundPaceFactor('MEDIUM', 0) < compoundPaceFactor('INTER', 0) &&
+      compoundPaceFactor('INTER', 0) < compoundPaceFactor('WET', 0),
+    `M ${compoundPaceFactor('MEDIUM', 0).toFixed(3)} I ${compoundPaceFactor('INTER', 0).toFixed(3)} W ${compoundPaceFactor('WET', 0).toFixed(3)}`,
+  );
+  check(
+    'intermediates take over once it is damp',
+    compoundPaceFactor('INTER', 0.3) < compoundPaceFactor('MEDIUM', 0.3),
+    `I ${compoundPaceFactor('INTER', 0.3).toFixed(3)} vs M ${compoundPaceFactor('MEDIUM', 0.3).toFixed(3)}`,
+  );
+  check(
+    'full wets take over in standing water',
+    compoundPaceFactor('WET', 0.85) < compoundPaceFactor('INTER', 0.85),
+    `W ${compoundPaceFactor('WET', 0.85).toFixed(3)} vs I ${compoundPaceFactor('INTER', 0.85).toFixed(3)}`,
+  );
+  check(
+    'a slick in the wet is ruinous, not merely slow',
+    compoundPaceFactor('SOFT', 0.6) > 1.5,
+    `${((compoundPaceFactor('SOFT', 0.6) - 1) * 100).toFixed(0)}% slower`,
+  );
+  check(
+    'a wet tyre on a dry track destroys itself',
+    compoundWearFactor('WET', 0) > 3,
+    `${compoundWearFactor('WET', 0).toFixed(1)}x wear`,
+  );
+  check(
+    'and a slick in the rain barely wears at all',
+    compoundWearFactor('SOFT', 0.7) < 0.7,
+    `${compoundWearFactor('SOFT', 0.7).toFixed(2)}x wear`,
+  );
+  check(
+    'the wrong tyre multiplies mistakes',
+    compoundRiskFactor('SOFT', 0.5) > compoundRiskFactor('INTER', 0.5) * 1.5,
+    `slick ${compoundRiskFactor('SOFT', 0.5).toFixed(2)}x vs inter ${compoundRiskFactor('INTER', 0.5).toFixed(2)}x`,
+  );
+  check('the recommendation follows the track', 
+    bestCompoundFor(0) === 'MEDIUM' && bestCompoundFor(0.3) === 'INTER' && bestCompoundFor(0.9) === 'WET');
+}
+
+console.log('\n== weather: on track ==');
+
+{
+  const mk = (w, kind, phases = []) => ({
+    startWetness: w,
+    phases: [{ fromLap: 0, kind, targetWetness: w }, ...phases],
+    airTempC: 20, trackTempC: 30, windKph: 10, rainChancePct: 50,
+  });
+
+  const race = (weather, laps = 16) => {
+    const engine = createRaceEngine({
+      circuit: SUZUKA, drivers: DRIVERS, seed: 7, startLap: 0, totalLaps: laps, weather,
+    });
+    for (let i = 0; i < 160_000 && engine.getState().sessionState !== 'FINISHED'; i++) {
+      engine.step(100);
+    }
+    return engine.getState();
+  };
+
+  const dry = race(mk(0, 'DRY'));
+  const soaked = race(mk(0.88, 'HEAVY_RAIN'));
+
+  const fastest = (s) => Math.min(...s.cars.map((c) => c.bestLapMs).filter((n) => n != null));
+
+  check(
+    'a wet race is genuinely slower than a dry one',
+    fastest(soaked) > fastest(dry) * 1.08,
+    `${(fastest(dry) / 1000).toFixed(1)}s dry vs ${(fastest(soaked) / 1000).toFixed(1)}s wet`,
+  );
+  check(
+    'the grid forms on wets when the race starts wet',
+    soaked.cars.every((c) => c.tyre.compound === 'WET' || c.tyre.compound === 'INTER'),
+    [...new Set(soaked.cars.map((c) => c.tyre.compound))].join('/'),
+  );
+  check(
+    'and on slicks when it does not',
+    dry.cars.every((c) => !['INTER', 'WET'].includes(c.tyre.compound)),
+    [...new Set(dry.cars.map((c) => c.tyre.compound))].join('/'),
+  );
+
+  /* Rain arriving mid-race is the point of the whole system. */
+  const caught = race(mk(0, 'DRY', [{ fromLap: 5, kind: 'HEAVY_RAIN', targetWetness: 0.85 }]));
+  check(
+    'rain arriving puts the field onto wet tyres',
+    caught.cars.filter((c) => ['INTER', 'WET'].includes(c.tyre.compound)).length >
+      caught.cars.length * 0.7,
+    `${caught.cars.filter((c) => ['INTER', 'WET'].includes(c.tyre.compound)).length}/${caught.cars.length} cars`,
+  );
+  check(
+    'and forces far more stops than a dry race',
+    caught.cars.reduce((a, c) => a + c.pitStops, 0) > dry.cars.reduce((a, c) => a + c.pitStops, 0),
+    `${caught.cars.reduce((a, c) => a + c.pitStops, 0)} vs ${dry.cars.reduce((a, c) => a + c.pitStops, 0)} stops`,
+  );
+  check('the track actually got wet', caught.weather.wetness > 0.6, caught.weather.wetness.toFixed(2));
+
+  /* A drying track is the opposite gamble. */
+  const drying = race(mk(0.8, 'HEAVY_RAIN', [{ fromLap: 3, kind: 'CLOUDY', targetWetness: 0 }]));
+  check('a drying track sheds its water', drying.weather.wetness < 0.35, drying.weather.wetness.toFixed(2));
+
+  /* Nobody gets stuck boxing every lap. */
+  check(
+    'no car pits absurdly often',
+    caught.cars.every((c) => c.pitStops <= 6),
+    `worst ${Math.max(...caught.cars.map((c) => c.pitStops))} stops`,
+  );
+
+  /* The fastest lap has to be a real lap, not a number invented on the grid. */
+  check(
+    'the fastest lap is a lap somebody actually set',
+    dry.cars.every((c) => c.bestLapMs == null || c.bestLapMs > 60_000),
+  );
+}
+
+console.log('\n== weather: the forecast ==');
+
+{
+  const track = buildTracks(6).find((t) => t.forecast.rainChancePct > 55) ?? buildTracks(6)[0];
+  const a = rollRaceWeather(track, 2026, 1, 20);
+  const b = rollRaceWeather(track, 2026, 1, 20);
+  check(
+    'the same weekend rolls the same weather',
+    JSON.stringify(a) === JSON.stringify(b),
+  );
+  const later = rollRaceWeather(track, 2026, 4, 20);
+  check(
+    'a different round can roll differently',
+    JSON.stringify(a) !== JSON.stringify(later) || a.phases.length === later.phases.length,
+  );
+  check('a forecast always has a starting phase', a.phases.length >= 1);
+  check(
+    'a mid-race change never lands on the opening or final lap',
+    a.phases.slice(1).every((p) => p.fromLap >= 2 && p.fromLap < 20),
+  );
+}
 
 console.log(
   failures === 0

@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/Badge';
 import { GameButton } from '@/components/game/GameButton';
 import { unconfirmedDrivers } from '@/game/machine';
 import { preRaceBriefing } from '@/game/briefing';
+import { rollRaceWeather } from '@/game/weather';
 import { scaledLaps } from '@/game/trackAdapter';
 import { cx, flagEmoji } from '@/lib/format';
 import { useGame } from '@/state/gameContext';
@@ -31,7 +32,12 @@ export function StrategyBriefingScreen({
   const outstanding = unconfirmedDrivers(state);
   const ready = outstanding.length === 0;
   const raceLaps = currentTrack ? scaledLaps(currentTrack, state.settings.raceLengthPct) : 0;
-  const briefing = preRaceBriefing(state, playerDrivers);
+  /* The same roll the race will use, so the room briefs on the weather
+   * that actually turns up. */
+  const weather = currentTrack
+    ? rollRaceWeather(currentTrack, state.season, state.round, raceLaps)
+    : undefined;
+  const briefing = preRaceBriefing(state, playerDrivers, weather);
 
   return (
     <div className="mx-auto grid w-full max-w-[1100px] gap-4 p-1">

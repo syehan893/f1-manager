@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import {
   AlertTriangle,
   Check,
+  CloudRain,
   Flame,
   Gauge,
   Hand,
@@ -29,6 +30,7 @@ import {
   emotionOf,
 } from '@/game/driverCondition';
 import { TYRE_COLOR, cx, formatGap, formatLapTime } from '@/lib/format';
+import { DAMP_THRESHOLD, bestCompoundFor, conditionLabel, isWrongTyre } from '@/game/weather';
 import { useGame } from '@/state/gameContext';
 import { useRace } from '@/state/raceContext';
 import type { CarState, TyreCompound } from '@/types';
@@ -57,6 +59,7 @@ import type { CarState, TyreCompound } from '@/types';
  * ===================================================================== */
 
 const DRY_COMPOUNDS: TyreCompound[] = ['SOFT', 'MEDIUM', 'HARD'];
+const WET_COMPOUNDS: TyreCompound[] = ['INTER', 'WET'];
 
 const SEVERITY_STYLE: Record<
   RadioSeverity,
@@ -411,6 +414,11 @@ export function RadioPanel({ className }: { className?: string }) {
     answerRadio,
   } = useRace();
 
+  /* How much water is on the track right now — what the pit wall is
+   * actually looking at when it decides what to bolt on. */
+  const wetness = snapshot.weather.wetness;
+  const trackIsWet = wetness >= DAMP_THRESHOLD;
+
   /** Calls the pit wall made, kept separate from what the drivers said. */
   const [pitCalls, setPitCalls] = useState<PitCallEntry[]>([]);
   const [seq, setSeq] = useState(0);
@@ -475,6 +483,30 @@ export function RadioPanel({ className }: { className?: string }) {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* The conditions, and — far more urgently — whether either car is
+          out there on a tyre that no longer suits them. A driver losing
+          seconds a lap on the wrong rubber is the one thing the pit wall
+          must never have to work out for itself. */}
+      {trackIsWet && (
+        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-neon-cyan/40 bg-neon-cyan/[0.06] px-3 py-2">
+          <CloudRain className="size-3.5 shrink-0 text-neon-cyan" />
+          <span className="text-[11px] font-bold text-chrome-100">
+            {conditionLabel(wetness)}
+          </span>
+          <span className="font-mono text-[10px] tracking-wider text-chrome-500 uppercase">
+            {Math.round(wetness * 100)}% water · {bestCompoundFor(wetness).toLowerCase()} is the tyre
+          </span>
+          {playerDrivers.some((driver) => {
+            const car = snapshot.cars.find((entry) => entry.driverId === driver.id);
+            return car && car.status !== 'RETIRED' && isWrongTyre(car.tyre.compound, wetness);
+          }) && (
+            <span className="ml-auto animate-pulse font-mono text-[10px] font-bold tracking-wider text-neon-red uppercase">
+              Wrong tyre — box now
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="grid gap-3">
         {playerDrivers.map((driver) => {
@@ -553,8 +585,14 @@ export function RadioPanel({ className }: { className?: string }) {
                   </span>
                 </div>
 
-                <div className="grid grid-cols-3 gap-1.5">
-                  {DRY_COMPOUNDS.map((compound) => {
+                {/* Wets appear once the track is actually wet: three slicks
+                    in a downpour is a broken pit wall, and five buttons on
+                    a dry Sunday is clutter. */}
+                <div className={cx('grid gap-1.5', trackIsWet ? 'grid-cols-5' : 'grid-cols-3')}>
+                  {(trackIsWet
+                    ? [...DRY_COMPOUNDS, ...WET_COMPOUNDS]
+                    : DRY_COMPOUNDS
+                  ).map((compound) => {
                     const selected = queued === compound;
                     return (
                       <button

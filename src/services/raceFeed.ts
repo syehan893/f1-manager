@@ -1,3 +1,4 @@
+import type { RaceWeather } from '@/game/weather';
 import { createRaceEngine } from '@/engine/raceEngine';
 import type {
   CarState,
@@ -108,6 +109,8 @@ export interface LocalFeedOptions {
   >;
   /** Per-car push level from the strategy screen. */
   pushLevel?: Record<string, number>;
+  /** The sky for this race. Omitted means a dry session. */
+  weather?: RaceWeather;
   /** How often an immutable snapshot is published to React (ms). */
   snapshotIntervalMs?: number;
 }

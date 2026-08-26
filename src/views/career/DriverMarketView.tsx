@@ -9,7 +9,7 @@ import { DriverPortrait } from '@/components/ui/DriverPortrait';
 import { GameButton } from '@/components/game/GameButton';
 import { driverRating, gridTeamOf } from '@/data/grid2026';
 import { cx, flagEmoji, formatCurrency } from '@/lib/format';
-import { prospectToDriver } from '@/game/driverDevelopment';
+import { prospectToDriver, scoutedRange } from '@/game/driverDevelopment';
 import { useGame } from '@/state/gameContext';
 import type { Driver } from '@/types';
 
@@ -128,7 +128,10 @@ function YoungTalent({ outgoingId }: { outgoingId: string | null }) {
           {unsigned.map((prospect) => {
             const driver = prospectToDriver(prospect);
             const now = driverRating(driver);
-            const gap = prospect.potential - now;
+            /* A ceiling nobody can measure is the whole gamble. Scouts
+             * give a range, not a number, and it only narrows once the
+             * driver has actually run seasons. */
+            const scouted = scoutedRange(state, prospect.id);
 
             return (
               <div
@@ -154,13 +157,12 @@ function YoungTalent({ outgoingId }: { outgoingId: string | null }) {
                   </div>
                   <div className="rounded-md border border-neon-cyan/25 bg-neon-cyan/[0.06] px-2 py-1.5">
                     <p className="text-[8px] tracking-widest text-chrome-600 uppercase">
-                      Ceiling
+                      Scouted ceiling
                     </p>
                     <p className="font-mono text-[13px] font-bold text-neon-cyan">
-                      {prospect.potential}
+                      {scouted.low}–{scouted.high}
                       <span className="ml-1 text-[9px] font-normal opacity-70">
-                        ({gap > 0 ? '+' : ''}
-                        {gap})
+                        ({scouted.high - scouted.low > 8 ? 'raw read' : 'confident'})
                       </span>
                     </p>
                   </div>

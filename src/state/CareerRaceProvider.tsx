@@ -12,8 +12,10 @@ import {
   staffTyreWearMultiplier,
 } from '@/game/staffing';
 import { carRating } from '@/data/grid2026';
+import { driverAdaptationPenalty } from '@/game/driverDevelopment';
 import { isRacePhase } from '@/game/phases';
 import { scaledLaps, trackToCircuit } from '@/game/trackAdapter';
+import { rollRaceWeather } from '@/game/weather';
 import type { RaceState, TyreCompound } from '@/types';
 
 /**
@@ -58,6 +60,17 @@ export function CareerRaceProvider({ children }: { children: ReactNode }) {
   const seed = useMemo(
     () => (state ? state.season * 1000 + state.round : 1),
     [state],
+  );
+
+  /* The sky for this round, rolled from the circuit's own forecast and
+   * keyed on the weekend, so reloading a save cannot fish for a dry
+   * afternoon — and so the strategy room and the race agree on it. */
+  const weather = useMemo(
+    () =>
+      state && currentTrack
+        ? rollRaceWeather(currentTrack, state.season, state.round, totalLaps)
+        : undefined,
+    [state, currentTrack, totalLaps],
   );
 
   /* The compounds signed off in the strategy room. Only the player's two
@@ -149,13 +162,24 @@ export function CareerRaceProvider({ children }: { children: ReactNode }) {
    * has had a torrid weekend races like it. */
   const condition = useMemo(() => {
     if (!state) return undefined;
+    const trackId = currentTrack?.id ?? '';
     return Object.fromEntries(
-      Object.keys(state.driverTeams).map((driverId) => [
-        driverId,
-        conditionEffects(conditionOf(state, driverId)),
-      ]),
+      Object.keys(state.driverTeams).map((driverId) => {
+        const effects = conditionEffects(conditionOf(state, driverId));
+        /* A driver at a circuit they have never seen is not yet on the
+         * pace. It rides on the same signed lap-time channel because that
+         * is exactly what it is — how much slower they are today — and it
+         * fades the moment the circuit is no longer new to them. */
+        const adaptation = driverAdaptationPenalty(state, driverId, trackId);
+        return [
+          driverId,
+          adaptation === 0
+            ? effects
+            : { ...effects, paceFactor: effects.paceFactor + adaptation },
+        ];
+      }),
     );
-  }, [state]);
+  }, [state, currentTrack]);
 
   /** The pit wall's standing instruction on how hard each car races. */
   const pushLevel = useMemo(() => {
@@ -235,6 +259,7 @@ export function CareerRaceProvider({ children }: { children: ReactNode }) {
       startLap={0}
       totalLaps={totalLaps}
       seed={seed}
+      weather={weather}
       scriptedPass={null}
       initialSpeed={0}
       focusDriverId={playerDrivers[0]?.id}

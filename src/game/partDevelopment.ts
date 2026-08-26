@@ -1,4 +1,5 @@
 import { rndEfficiency } from './facilities';
+import { driverFeedbackBonus } from './driverDevelopment';
 import { PART_BY_ID } from './carModel';
 import { staffRndEfficiency } from './staffing';
 import type { GameState, PartCategory, RndArea, TeamSeasonState } from './types';
@@ -107,7 +108,11 @@ export function developmentGain(
   intensity: DevelopmentIntensity,
 ): number {
   const area = PART_AREA[category];
-  const efficiency = rndEfficiency(state, area) * staffRndEfficiency(state, area);
+  /* The drivers are part of the development programme too: what they can
+   * tell the engineers is the difference between a cheque that lands and
+   * one that is spent guessing. */
+  const efficiency =
+    rndEfficiency(state, area) * staffRndEfficiency(state, area) * driverFeedbackBonus(state);
   const raw =
     (BASE_STEP_GAIN * settingsFor(intensity).gainFactor * efficiency) /
     difficultyAt(level);

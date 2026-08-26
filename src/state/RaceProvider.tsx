@@ -5,6 +5,7 @@ import { SUZUKA } from '@/data/circuits';
 import { DRIVERS } from '@/data/drivers';
 import { createRaceFeed } from '@/services/raceFeed';
 import { createRadioBrain } from '@/game/driverRadio';
+import type { RaceWeather } from '@/game/weather';
 import type { PitWallCall, RadioMessage } from '@/game/driverRadio';
 import type {
   Circuit,
@@ -72,6 +73,8 @@ export interface RaceProviderProps {
   >;
   /** Per-car push level from the strategy screen. */
   pushLevel?: Record<string, number>;
+  /** The sky for this race. Omitted means a dry session. */
+  weather?: RaceWeather;
   /** How a driver is feeling, so the radio can speak in their voice. */
   emotionOf?: (driverId: string) => string;
   /** Fired when something in the race should move a driver's condition. */
@@ -102,6 +105,7 @@ export function RaceProvider({
   aiRacecraft,
   condition,
   pushLevel,
+  weather,
   emotionOf,
   onConditionEvent,
   onFinished,
@@ -138,6 +142,7 @@ export function RaceProvider({
     tyreCare,
     condition,
     pushLevel,
+    weather,
     focusDriverId,
     radioDriverIds,
   }));
@@ -162,6 +167,7 @@ export function RaceProvider({
         tyreCare: session.tyreCare,
         condition: session.condition,
         pushLevel: session.pushLevel,
+        weather: session.weather,
       }),
     [session],
   );

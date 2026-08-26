@@ -7,13 +7,13 @@ import { POINTS_TABLE, applyRaceResult, pointsForPosition, scoreRace } from '../
 import { evaluateApplication, jobOpenings } from '../src/game/jobMarket';
 import { scaledLaps, trackToCircuit } from '../src/game/trackAdapter';
 import { GRID_2026_DRIVERS, GRID_2026_TEAMS, carRating, driverRating } from '../src/data/grid2026';
-import { quoteTransfer } from '../src/game/finance';
+import { driverValuation, quoteTransfer } from '../src/game/finance';
 import { seasonScore } from '../src/game/transferMarket';
 import { profileFor } from '../src/game/difficulty';
 import { blankStrategy } from '../src/game/machine';
 import { PARTS, enginePenaltyPlaces, fittedUnit } from '../src/game/carModel';
 import { developmentGain, partLevel } from '../src/game/partDevelopment';
-import { ATTRIBUTE_KEYS, currentRating, prospectToDriver } from '../src/game/driverDevelopment';
+import { ATTRIBUTE_KEYS, currentRating, driverAdaptationPenalty, driverFeedbackBonus, effectiveDriver, potentialOf, prospectToDriver, scoutedRange } from '../src/game/driverDevelopment';
 import { blankCondition, conditionEffects, emotionOf } from '../src/game/driverCondition';
 import { currentSeasonRecord } from '../src/game/seasonArchive';
 import { preRaceBriefing, postRaceBriefing } from '../src/game/briefing';
@@ -1503,6 +1503,116 @@ console.log('\n== team principal reputation ==');
     'a strong principal grows reputation faster than a vacancy',
     staffReputationBonus(withBoss) > staffReputationBonus(base),
     `${staffReputationBonus(withBoss).toFixed(2)} vs ${staffReputationBonus(base).toFixed(2)}`,
+  );
+}
+
+
+console.log('\n== potential is a real ceiling ==');
+
+{
+  let g = createNewGame('Krowten');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'confirm setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview team');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'confirm team');
+  g = must(g, { type: 'START_SEASON' }, 'start season');
+
+  const low = g.prospects.reduce((a, b) => (a.potential <= b.potential ? a : b));
+  const high = g.prospects.reduce((a, b) => (a.potential >= b.potential ? a : b));
+  check(
+    'a stated ceiling is what binds a junior',
+    potentialOf(g, low.id) === low.potential && potentialOf(g, high.id) === high.potential,
+    `${low.lastName} ${low.potential} · ${high.lastName} ${high.potential}`,
+  );
+
+  /* An established driver has no stated ceiling, so it is derived from
+   * what they are and how much career they have left. */
+  const verst = potentialOf(g, 'verstappen');
+  check('an established driver gets a derived ceiling', verst > 0 && verst <= 99, String(verst));
+
+  /* The scouting report is a range, and it narrows with races run. */
+  const raw = scoutedRange(g, high.id);
+  const seasoned = scoutedRange(
+    { ...g, driverRecords: { ...g.driverRecords, [high.id]: { driverId: high.id, age: 19, deltas: {}, seasonsRun: 3, careerPoints: 0, careerWins: 0, careerPodiums: 0 } } },
+    high.id,
+  );
+  check(
+    'scouting is a range, not a number',
+    raw.high > raw.low,
+    `${raw.low}-${raw.high}`,
+  );
+  check(
+    'and it narrows once they have actually raced',
+    seasoned.high - seasoned.low < raw.high - raw.low,
+    `${raw.high - raw.low} -> ${seasoned.high - seasoned.low}`,
+  );
+}
+
+console.log('\n== adaptability and feedback ==');
+
+{
+  let g = createNewGame('Krowten');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'confirm setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview team');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'confirm team');
+  g = must(g, { type: 'START_SEASON' }, 'start season');
+
+  const trackId = g.calendarTrackIds[0]!;
+  const ours = Object.entries(g.driverTeams)
+    .filter(([, teamId]) => teamId === g.playerTeamId)
+    .map(([driverId]) => driverId);
+
+  const fresh = driverAdaptationPenalty(g, ours[0]!, trackId);
+  check('a circuit nobody has raced costs lap time', fresh > 0, fresh.toFixed(5));
+
+  const beenThere = {
+    ...g,
+    history: [{ season: 2026, round: 1, trackId, bestFinish: 8, pointsScored: 4 }],
+    driverRecords: {
+      ...g.driverRecords,
+      [ours[0]!]: { ...g.driverRecords[ours[0]!]!, seasonsRun: 4 },
+    },
+  };
+  check(
+    'and costs nothing once it is familiar',
+    driverAdaptationPenalty(beenThere, ours[0]!, trackId) === 0,
+  );
+
+  /* Feedback moves what a development cheque buys. */
+  const bonus = driverFeedbackBonus(g);
+  check('the line-up moves development return', bonus > 0.8 && bonus < 1.2, bonus.toFixed(3));
+
+  const gain = developmentGain(g, 'FLOOR', 60, 'NORMAL');
+  check('development still returns a sane gain', gain > 0, String(gain));
+}
+
+console.log('\n== academy graduates are priced properly ==');
+
+{
+  let g = createNewGame('Krowten');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'confirm setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview team');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'confirm team');
+  g = must(g, { type: 'START_SEASON' }, 'start season');
+
+  const prospect = g.prospects[0]!;
+  const withGraduate = { ...g, academyDrivers: [prospect] };
+
+  const blind = driverValuation(prospect.id);
+  const known = driverValuation(prospect.id, withGraduate);
+  check(
+    'a graduate is no longer valued at the floor',
+    known > blind,
+    `${(blind / 1e6).toFixed(1)}M blind vs ${(known / 1e6).toFixed(1)}M with the save`,
+  );
+
+  const quote = quoteTransfer(prospect.id, 'albon', withGraduate);
+  check('a transfer involving one quotes a real wage delta', quote.wageDelta !== 0, String(quote.wageDelta));
+
+  /* And they age and develop like anybody else, which they could not do
+   * while `effectiveDriver` only looked in the current intake. */
+  check(
+    'a graduate resolves as a real driver',
+    Boolean(effectiveDriver(withGraduate, prospect.id)),
   );
 }
 
