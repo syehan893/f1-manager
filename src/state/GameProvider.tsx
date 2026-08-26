@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { prospectToDriver } from '@/game/driverDevelopment';
 import { GRID_2026_DRIVERS, gridTeamOf } from '@/data/grid2026';
 import { buildTracks } from '@/lib/careerGen';
 import { COMPONENT_CATALOG, transition } from '@/game/machine';
@@ -104,11 +105,34 @@ export function GameProvider({ children }: { children: ReactNode }) {
 
   const roster = useMemo(() => {
     if (!state) return GRID_2026_DRIVERS;
-    // Apply live transfers so every screen sees the same team assignments.
-    return GRID_2026_DRIVERS.map((driver) => {
-      const teamId = state.driverTeams[driver.id];
-      return teamId && teamId !== driver.teamId ? { ...driver, teamId } : driver;
+    /* Apply live transfers so every screen sees the same team assignments.
+     * A driver with no entry in `driverTeams` has lost their seat — they
+     * must not keep the team the data file gave them, or a driver the
+     * player released goes on showing up in their own line-up. */
+    const established = GRID_2026_DRIVERS.map((driver) => {
+      const teamId = state.driverTeams[driver.id] ?? '';
+      return teamId === driver.teamId ? driver : { ...driver, teamId };
     });
+
+    /* Juniors who have been promoted are not in the 2026 data file, so
+     * without this they hold a seat that names nobody: they disappear
+     * from the driver list, from the line-up, and from the grid on a
+     * Sunday. They get a free car number so the timing tower and the
+     * track markers can tell them apart from everyone else. */
+    const taken = new Set(established.map((driver) => driver.carNumber));
+    const graduates = (state.academyDrivers ?? [])
+      .filter((prospect) => Boolean(state.driverTeams[prospect.id]))
+      .map((prospect) => {
+        let carNumber = 2;
+        while (taken.has(carNumber) && carNumber < 100) carNumber++;
+        taken.add(carNumber);
+        return prospectToDriver(prospect, {
+          teamId: state.driverTeams[prospect.id]!,
+          carNumber,
+        });
+      });
+
+    return graduates.length > 0 ? [...established, ...graduates] : established;
   }, [state]);
 
   const calendar = useMemo(

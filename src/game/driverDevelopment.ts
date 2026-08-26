@@ -340,17 +340,27 @@ export function buildProspects(season: number, count = 6): ProspectDriver[] {
   return prospects;
 }
 
-/** A prospect rendered as a full driver, so the rest of the app can use it. */
-export function prospectToDriver(prospect: ProspectDriver): Driver {
+/**
+ * A prospect rendered as a full driver, so the rest of the app can use it.
+ *
+ * On the market screen there is no seat and no number yet, which is what
+ * the defaults describe. Once a junior is actually signed the caller has
+ * both, and passes them — a driver with no team and car number 0 is fine
+ * on a scouting card but wrong everywhere a real entry is expected.
+ */
+export function prospectToDriver(
+  prospect: ProspectDriver,
+  seat?: { teamId: string; carNumber: number },
+): Driver {
   return {
     id: prospect.id,
     code: prospect.code,
     firstName: prospect.firstName,
     lastName: prospect.lastName,
-    teamId: '',
+    teamId: seat?.teamId ?? '',
     countryCode: prospect.countryCode,
     country: prospect.countryCode,
-    carNumber: 0,
+    carNumber: seat?.carNumber ?? 0,
     age: prospect.age,
     attributes: prospect.attributes,
     morale: 80,

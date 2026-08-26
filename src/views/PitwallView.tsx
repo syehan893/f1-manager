@@ -22,7 +22,6 @@ import { Panel } from '@/components/ui/Panel';
 import { Badge, StatusDot } from '@/components/ui/Badge';
 import { GameButton } from '@/components/game/GameButton';
 import { TrackThumbnail } from '@/components/career/TrackThumbnail';
-import { GRID_2026_DRIVERS } from '@/data/grid2026';
 import { SessionTelemetry } from '@/components/race/SessionTelemetry';
 import type { TraceId } from '@/components/race/SessionTelemetry';
 import { isRacePhase } from '@/game/phases';
@@ -33,7 +32,6 @@ import { useRace } from '@/state/raceContext';
 import type { GamePhase } from '@/game/types';
 import type { ViewId } from '@/types';
 
-const DRIVER_BY_ID = new Map(GRID_2026_DRIVERS.map((driver) => [driver.id, driver]));
 
 /** Simulated seconds per real second at "1x". */
 const TIME_COMPRESSION = 6;
@@ -193,7 +191,11 @@ function PitwallEmptyState({ onNavigate }: { onNavigate: (view: ViewId) => void 
 /* -------------------------------- cockpit ------------------------------ */
 
 function PitwallRace({ onNavigate }: { onNavigate: (view: ViewId) => void }) {
-  const { state, dispatch, currentTrack, playerTeam, phase } = useGame();
+  const { state, dispatch, currentTrack, playerTeam, phase, roster } = useGame();
+  /* Named from the live roster rather than the 2026 data file: a junior
+   * who has been promoted into a seat is not in that file, and would
+   * otherwise render as a raw driver id. */
+  const driverById = new Map(roster.map((driver) => [driver.id, driver]));
   const { snapshot, send } = useRace();
   const [trace, setTrace] = useState<TraceId>('PACE');
 
@@ -302,7 +304,7 @@ function PitwallRace({ onNavigate }: { onNavigate: (view: ViewId) => void }) {
           <div className="ml-auto flex flex-wrap items-center gap-2">
             {ourCars.map((car) => (
               <Badge key={car.driverId} tone="cyan" mono>
-                {DRIVER_BY_ID.get(car.driverId)?.code ?? car.driverId}{' '}
+                {driverById.get(car.driverId)?.code ?? car.driverId}{' '}
                 {car.status === 'RETIRED' ? 'DNF' : `P${car.position}`}
               </Badge>
             ))}
@@ -421,7 +423,7 @@ function PitwallRace({ onNavigate }: { onNavigate: (view: ViewId) => void }) {
       >
         <ul className="space-y-1.5">
           {snapshot.incidents.slice(0, 16).map((incident) => {
-            const driver = incident.driverId ? DRIVER_BY_ID.get(incident.driverId) : undefined;
+            const driver = incident.driverId ? driverById.get(incident.driverId) : undefined;
             return (
               <li
                 key={incident.id}

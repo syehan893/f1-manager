@@ -221,6 +221,13 @@ export function applyTransferMoves(state: GameState, moves: TransferMove[]): voi
       delete state.driverTeams[move.outgoingDriverId];
     }
 
+    /* A junior promoted by a rival has to be kept durably too — the
+     * intake they came from is rebuilt from scratch every season. */
+    const graduate = state.prospects.find((entry) => entry.id === move.incomingDriverId);
+    if (graduate && !state.academyDrivers.some((entry) => entry.id === graduate.id)) {
+      state.academyDrivers.push({ ...graduate, attributes: { ...graduate.attributes } });
+    }
+
     // A promoted junior needs a career record like anybody else.
     if (!state.driverConditions[move.incomingDriverId]) {
       state.driverConditions[move.incomingDriverId] = {

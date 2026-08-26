@@ -106,20 +106,30 @@ export function RaceProvider({
   onConditionEvent,
   onFinished,
 }: RaceProviderProps) {
-  // The feed and the motion channels are created once per session config.
-  /* ---- what defines a session, and what merely configures it --------
-   * Everything the engine needs per car — grid, tyres, reliability, crew,
-   * condition, push level — is derived from the save, so a *new object*
-   * appears on every dispatch. If those were dependencies of the feed,
-   * any action taken during a race would tear the engine down and start
-   * the race again from lights out.
+  /* ---- a session is immutable once it has started -------------------
+   * Every input here is derived from the save, so a *new object identity*
+   * appears on every single dispatch — the grid array, the circuit, the
+   * per-car maps, all of them. If any of that reached the feed's or the
+   * brain's dependency list, an action taken during a race would tear the
+   * engine down and start the race again from lights out. A condition
+   * event a couple of seconds after the lights is enough to do it.
    *
-   * So they are captured once, at construction. The session itself is
-   * defined by the circuit, the grid and the seed, and only those rebuild
-   * it. Anything that genuinely has to change mid-race goes in as a
-   * command — see `SET_CONDITION` below.
+   * So the whole session is captured once, at construction, and nothing
+   * can rebuild it. Starting a *different* race is a remount — the owner
+   * passes a `key` — which is the only honest way to say "new session".
+   * Anything that genuinely has to change mid-race goes in as a command:
+   * see `SET_CONDITION` below.
    * ------------------------------------------------------------------ */
-  const [setup] = useState(() => ({
+  const [session] = useState(() => ({
+    circuit,
+    drivers,
+    seed,
+    startLap,
+    totalLaps,
+    scriptedPass,
+    aiSkill,
+    aiStrategyVariance,
+    aiRacecraft,
     startingTyres,
     reliability,
     manualPitDriverIds,
@@ -128,39 +138,37 @@ export function RaceProvider({
     tyreCare,
     condition,
     pushLevel,
+    focusDriverId,
+    radioDriverIds,
   }));
 
   const feed = useMemo(
     () =>
       createRaceFeed({
-        circuit,
-        drivers,
-        seed,
-        startLap,
-        totalLaps,
-        scriptedPass: scriptedPass ?? undefined,
-        aiSkill,
-        aiStrategyVariance,
-        aiRacecraft,
-        ...setup,
+        circuit: session.circuit,
+        drivers: session.drivers,
+        seed: session.seed,
+        startLap: session.startLap,
+        totalLaps: session.totalLaps,
+        scriptedPass: session.scriptedPass ?? undefined,
+        aiSkill: session.aiSkill,
+        aiStrategyVariance: session.aiStrategyVariance,
+        aiRacecraft: session.aiRacecraft,
+        startingTyres: session.startingTyres,
+        reliability: session.reliability,
+        manualPitDriverIds: session.manualPitDriverIds,
+        carPace: session.carPace,
+        pitCrew: session.pitCrew,
+        tyreCare: session.tyreCare,
+        condition: session.condition,
+        pushLevel: session.pushLevel,
       }),
-    [
-      circuit,
-      drivers,
-      seed,
-      startLap,
-      totalLaps,
-      scriptedPass,
-      aiSkill,
-      aiStrategyVariance,
-      aiRacecraft,
-      setup,
-    ],
+    [session],
   );
 
   const motion = useMemo(() => {
     const map = new Map<string, CarMotion>();
-    for (const driver of drivers) {
+    for (const driver of session.drivers) {
       map.set(driver.id, {
         progress: motionValue(0),
         pitProgress: motionValue(0),
@@ -168,13 +176,13 @@ export function RaceProvider({
       });
     }
     return map;
-  }, [drivers]);
+  }, [session]);
 
   const [snapshot, setSnapshot] = useState<RaceState>(() => feed.getSnapshot());
   const [feedStatus, setFeedStatus] = useState<FeedStatus>(() => feed.getStatus());
   const [activeOvertakes, setActiveOvertakes] = useState<OvertakeEvent[]>([]);
   const [focusedDriverId, setFocusedDriverId] = useState<string>(
-    () => focusDriverId ?? drivers[0]?.id ?? SCRIPTED_PASS.overtakerId,
+    () => session.focusDriverId ?? session.drivers[0]?.id ?? SCRIPTED_PASS.overtakerId,
   );
 
   const [radio, setRadio] = useState<RadioMessage[]>([]);
@@ -195,11 +203,12 @@ export function RaceProvider({
   const brain = useMemo(
     () =>
       createRadioBrain({
-        drivers,
-        focusDriverIds: radioDriverIds ?? (focusDriverId ? [focusDriverId] : []),
-        seed,
+        drivers: session.drivers,
+        focusDriverIds:
+          session.radioDriverIds ?? (session.focusDriverId ? [session.focusDriverId] : []),
+        seed: session.seed,
       }),
-    [drivers, radioDriverIds, focusDriverId, seed],
+    [session],
   );
 
   /* The callers derive these from the save, so they are new functions on
@@ -385,7 +394,7 @@ export function RaceProvider({
   const value = useMemo<RaceContextValue>(
     () => ({
       snapshot,
-      circuit,
+      circuit: session.circuit,
       feedSource: feed.source,
       feedStatus,
       motion,
@@ -401,7 +410,7 @@ export function RaceProvider({
     }),
     [
       snapshot,
-      circuit,
+      session,
       feed.source,
       feedStatus,
       motion,

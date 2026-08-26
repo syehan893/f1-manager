@@ -476,7 +476,7 @@ export interface RoundRecord {
   pointsScored: number;
 }
 
-export const SAVE_VERSION = 11;
+export const SAVE_VERSION = 12;
 
 export interface GameState {
   /** Bumped when the shape changes; older saves are discarded on load. */
@@ -532,6 +532,12 @@ export interface GameState {
   driverConditions: Record<string, DriverCondition>;
   /** This season's junior intake. Regenerated every year. */
   prospects: ProspectDriver[];
+  /* Juniors who have taken a seat. The intake above is rebuilt from
+   * scratch every season, so a graduate has to be copied somewhere
+   * durable at the moment they are signed — otherwise they hold a seat
+   * that no longer names anybody, and they vanish from the grid at the
+   * next new year. */
+  academyDrivers: ProspectDriver[];
   /** Completed championships, newest last. */
   seasonArchive: SeasonRecord[];
   /**

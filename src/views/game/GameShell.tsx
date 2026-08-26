@@ -39,7 +39,7 @@ function ScreenForPhase({
     case 'RACE_SESSION':
       return <RaceScreen onNavigate={onNavigate} />;
     case 'POST_RACE':
-      return <PostRaceScreen />;
+      return <PostRaceScreen onNavigate={onNavigate} />;
     case 'SEASON_REVIEW':
       return <SeasonReviewScreen />;
     default:

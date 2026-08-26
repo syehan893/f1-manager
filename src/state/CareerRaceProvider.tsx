@@ -221,8 +221,15 @@ export function CareerRaceProvider({ children }: { children: ReactNode }) {
   // Between race weekends there is no session to run.
   if (!racing || !circuit || !state) return <>{children}</>;
 
+  /* A session is immutable once it has started, so the only way to begin a
+   * different race is to remount the provider. This key is what says so:
+   * one race weekend, one engine, however many actions the player takes
+   * during it. */
+  const sessionKey = `${state.season}-${state.round}-${currentTrack?.id ?? 'x'}`;
+
   return (
     <RaceProvider
+      key={sessionKey}
       drivers={gridDrivers}
       circuit={circuit}
       startLap={0}

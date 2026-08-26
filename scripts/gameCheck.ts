@@ -16,6 +16,7 @@ import { developmentGain, partLevel } from '../src/game/partDevelopment';
 import { ATTRIBUTE_KEYS, currentRating, prospectToDriver } from '../src/game/driverDevelopment';
 import { blankCondition, conditionEffects, emotionOf } from '../src/game/driverCondition';
 import { currentSeasonRecord } from '../src/game/seasonArchive';
+import { preRaceBriefing, postRaceBriefing } from '../src/game/briefing';
 import { ROLES } from '../src/data/staff';
 import { staffMarket, staffRndEfficiency, vacantRoles } from '../src/game/staffing';
 import { rndEfficiency } from '../src/game/facilities';
@@ -1282,6 +1283,141 @@ check(
 
 const reset = transition(state, { type: 'RESET' });
 check('reset clears the game', reset.ok && reset.state === null);
+
+
+console.log('\n== academy graduates ==');
+
+{
+  /* A junior who is signed has to survive the season rollover: the intake
+   * they came from is rebuilt from scratch every year. */
+  let g = createNewGame('Krowten');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'confirm setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview team');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'confirm team');
+  g = must(g, { type: 'START_SEASON' }, 'start season');
+
+  const ourDrivers = Object.entries(g.driverTeams)
+    .filter(([, teamId]) => teamId === g.playerTeamId)
+    .map(([driverId]) => driverId);
+  const prospect = g.prospects[0]!;
+  const ourTeam = g.teams.find((t) => t.teamId === g.playerTeamId)!;
+  ourTeam.budget = 200_000_000;
+
+  const signed = transition(g, {
+    type: 'SIGN_PROSPECT',
+    prospectId: prospect.id,
+    outgoingDriverId: ourDrivers[0]!,
+  });
+  check('a junior can be signed into a seat', signed.ok, signed.message);
+
+  if (signed.ok && signed.state) {
+    const after = signed.state;
+    check('the junior holds the seat', after.driverTeams[prospect.id] === after.playerTeamId);
+    check(
+      'and is copied somewhere durable',
+      after.academyDrivers.some((entry) => entry.id === prospect.id),
+    );
+
+    /* The whole point: the graduate no longer depends on the intake. */
+    const nextIntake = { ...after, prospects: [] };
+    check(
+      'the graduate survives the intake being rebuilt',
+      nextIntake.academyDrivers.some((entry) => entry.id === prospect.id) &&
+        nextIntake.driverTeams[prospect.id] === nextIntake.playerTeamId,
+    );
+
+    const asDriver = prospectToDriver(prospect, { teamId: 'williams', carNumber: 45 });
+    check(
+      'a graduate renders as a complete race entry',
+      asDriver.teamId === 'williams' && asDriver.carNumber === 45,
+      `#${asDriver.carNumber} ${asDriver.lastName}`,
+    );
+  }
+}
+
+console.log('\n== briefing room ==');
+
+{
+  let g = createNewGame('Krowten');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'confirm setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview team');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'confirm team');
+  g = must(g, { type: 'START_SEASON' }, 'start season');
+  const ours = GRID_2026_DRIVERS.filter((d) => g.driverTeams[d.id] === g.playerTeamId);
+
+  const cold = preRaceBriefing(g, ours);
+  check('the briefing is never empty', cold.length > 0, `${cold.length} lines`);
+  check(
+    'the strategist is always in the room',
+    cold.some((line) => line.subtitle === 'Chief Strategist'),
+  );
+  check('the commercial side is always in the room', cold.some((l) => l.topic === 'SPONSOR'));
+  check(
+    'an unsigned plan is raised, not hidden',
+    cold.some((line) => line.tone === 'WARN' || line.tone === 'BAD'),
+  );
+  check(
+    'every driver has a voice',
+    ours.every((d) => cold.some((l) => l.kind === 'DRIVER' && l.name.includes(d.lastName))),
+  );
+  check(
+    'no driver monopolises it',
+    ours.every(
+      (d) =>
+        cold.filter((l) => l.kind === 'DRIVER' && l.name.includes(d.lastName)).length <= 3,
+    ),
+  );
+
+
+  check(
+    'team-mates never say the same thing',
+    (() => {
+      const texts = cold.filter((l) => l.kind === 'DRIVER').map((l) => l.text);
+      return new Set(texts).size === texts.length;
+    })(),
+  );
+
+  const again = preRaceBriefing(g, ours);
+  check(
+    'the same save briefs identically',
+    JSON.stringify(cold.map((l) => l.text)) === JSON.stringify(again.map((l) => l.text)),
+  );
+
+  const withPlan = { ...g, strategies: { ...g.strategies } };
+  for (const driver of ours) {
+    withPlan.strategies[driver.id] = {
+      ...blankStrategy(driver.id),
+      startingCompound: 'HARD' as const,
+      pushLevel: 5,
+      confirmedForRound: withPlan.round,
+      stints: [
+        { compound: 'HARD' as const, plannedLaps: 8 },
+        { compound: 'MEDIUM' as const, plannedLaps: 6 },
+      ],
+    };
+  }
+  const briefed = preRaceBriefing(withPlan, ours);
+  check(
+    'a driver reads the compound they were actually given',
+    briefed.some((l) => l.topic === 'TYRES' && /hard/i.test(l.text)),
+  );
+  check('and reacts to the push level they were set', briefed.some((l) => l.topic === 'AGGRESSION'));
+
+  const rattled = {
+    ...withPlan,
+    driverConditions: {
+      ...withPlan.driverConditions,
+      [ours[0]!.id]: { ...blankCondition(ours[0]!.id), mood: 20, stress: 92 },
+    },
+  };
+  check(
+    'condition changes what a driver says',
+    JSON.stringify(preRaceBriefing(rattled, ours).map((l) => l.text)) !==
+      JSON.stringify(briefed.map((l) => l.text)),
+  );
+
+  check('there is no debrief before the race', postRaceBriefing(g, ours).length === 0);
+}
 
 console.log(failures === 0 ? '\nAll game-flow checks passed.\n' : `\n${failures} check(s) FAILED.\n`);
 process.exit(failures === 0 ? 0 : 1);

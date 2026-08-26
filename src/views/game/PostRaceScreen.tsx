@@ -4,11 +4,12 @@ import { GameButton } from '@/components/game/GameButton';
 import { ChampionshipTables } from '@/components/game/ChampionshipTables';
 import { Panel } from '@/components/ui/Panel';
 import { Badge } from '@/components/ui/Badge';
-import { GRID_2026_DRIVERS, gridTeamOf } from '@/data/grid2026';
+import { gridTeamOf } from '@/data/grid2026';
+import { BriefingRoom } from '@/components/game/BriefingRoom';
+import { postRaceBriefing } from '@/game/briefing';
 import { cx, flagEmoji, formatLapTime } from '@/lib/format';
 import { useGame } from '@/state/gameContext';
-
-const DRIVER_BY_ID = new Map(GRID_2026_DRIVERS.map((driver) => [driver.id, driver]));
+import type { ViewId } from '@/types';
 
 function PositionDelta({ gained }: { gained: number }) {
   if (gained === 0) {
@@ -33,13 +34,17 @@ function PositionDelta({ gained }: { gained: number }) {
 }
 
 /** Phase: POST_RACE — classification, points and updated championships. */
-export function PostRaceScreen() {
-  const { state, dispatch, currentTrack, playerTeam } = useGame();
+export function PostRaceScreen({ onNavigate }: { onNavigate?: (view: ViewId) => void }) {
+  const { state, dispatch, currentTrack, playerTeam, roster, playerDrivers } = useGame();
   if (!state || !state.lastRace) return null;
+
+  /* Named from the live roster, not the 2026 data file: a junior who has
+   * been promoted is not in that file and would show up as a raw id. */
+  const driverById = new Map(roster.map((driver) => [driver.id, driver]));
 
   const result = state.lastRace;
   const winner = result.finishers[0];
-  const winnerDriver = winner ? DRIVER_BY_ID.get(winner.driverId) : undefined;
+  const winnerDriver = winner ? driverById.get(winner.driverId) : undefined;
 
   const ourFinishes = result.finishers.filter((finish) => finish.teamId === playerTeam?.id);
   const ourPoints = ourFinishes.reduce((sum, finish) => sum + finish.points, 0);
@@ -145,7 +150,7 @@ export function PostRaceScreen() {
             </thead>
             <tbody>
               {result.finishers.map((finish, index) => {
-                const driver = DRIVER_BY_ID.get(finish.driverId);
+                const driver = driverById.get(finish.driverId);
                 const team = gridTeamOf(finish.teamId);
                 const isPlayer = finish.teamId === playerTeam?.id;
 
@@ -236,6 +241,13 @@ export function PostRaceScreen() {
           </table>
         </div>
       </Panel>
+
+      <BriefingRoom
+        title="Debrief"
+        lines={postRaceBriefing(state, playerDrivers)}
+        onNavigate={onNavigate}
+        emptyText="The room is quiet. Nothing to pick over from that one."
+      />
 
       {/* Championships */}
       <ChampionshipTables

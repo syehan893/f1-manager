@@ -7,15 +7,18 @@ import { Badge } from '@/components/ui/Badge';
 import { QUALIFYING_LAPS, simulateQualifying } from '@/game/qualifying';
 import { simulatorEdge } from '@/game/facilities';
 import { staffQualifyingEdge } from '@/game/staffing';
-import { GRID_2026_DRIVERS, gridTeamOf } from '@/data/grid2026';
+import { gridTeamOf } from '@/data/grid2026';
 import { cx, flagEmoji, formatLapTime } from '@/lib/format';
 import { useGame } from '@/state/gameContext';
 
-const DRIVER_BY_ID = new Map(GRID_2026_DRIVERS.map((driver) => [driver.id, driver]));
 
 /** Phase: QUALIFYING — five laps each, best one sets the grid. */
 export function QualifyingScreen() {
   const { state, dispatch, currentTrack, roster, playerTeam } = useGame();
+  /* Named from the live roster rather than the 2026 data file: a junior who
+   * has been promoted into a seat is not in that file, and would otherwise
+   * render as a raw driver id. */
+  const driverById = new Map(roster.map((driver) => [driver.id, driver]));
   const [expanded, setExpanded] = useState<string | null>(null);
   const simulatedFor = useRef<string | null>(null);
 
@@ -87,8 +90,8 @@ export function QualifyingScreen() {
           <div className="min-w-0 flex-1">
             <p className="text-[10px] tracking-widest text-chrome-500 uppercase">Pole position</p>
             <p className="truncate text-[15px] font-bold text-chrome-100">
-              {DRIVER_BY_ID.get(pole.driverId)?.firstName}{' '}
-              {DRIVER_BY_ID.get(pole.driverId)?.lastName}
+              {driverById.get(pole.driverId)?.firstName}{' '}
+              {driverById.get(pole.driverId)?.lastName}
             </p>
           </div>
           <span className="shrink-0 font-mono text-lg font-bold text-neon-amber">
@@ -116,7 +119,7 @@ export function QualifyingScreen() {
         ) : (
           <ul>
             {result.entries.map((entry, index) => {
-              const driver = DRIVER_BY_ID.get(entry.driverId);
+              const driver = driverById.get(entry.driverId);
               const team = gridTeamOf(entry.teamId);
               const isPlayer = entry.teamId === playerTeam?.id;
               const isOpen = expanded === entry.driverId;

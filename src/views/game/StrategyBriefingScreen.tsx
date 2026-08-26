@@ -1,9 +1,11 @@
 import { motion } from 'framer-motion';
 import { ClipboardCheck, Flag, Route } from 'lucide-react';
 import { Panel } from '@/components/ui/Panel';
+import { BriefingRoom } from '@/components/game/BriefingRoom';
 import { Badge } from '@/components/ui/Badge';
 import { GameButton } from '@/components/game/GameButton';
 import { unconfirmedDrivers } from '@/game/machine';
+import { preRaceBriefing } from '@/game/briefing';
 import { scaledLaps } from '@/game/trackAdapter';
 import { cx, flagEmoji } from '@/lib/format';
 import { useGame } from '@/state/gameContext';
@@ -29,6 +31,7 @@ export function StrategyBriefingScreen({
   const outstanding = unconfirmedDrivers(state);
   const ready = outstanding.length === 0;
   const raceLaps = currentTrack ? scaledLaps(currentTrack, state.settings.raceLengthPct) : 0;
+  const briefing = preRaceBriefing(state, playerDrivers);
 
   return (
     <div className="mx-auto grid w-full max-w-[1100px] gap-4 p-1">
@@ -119,6 +122,13 @@ export function StrategyBriefingScreen({
           })}
         </div>
       </Panel>
+
+      <BriefingRoom
+        title="The Briefing Room"
+        lines={briefing}
+        onNavigate={onNavigate}
+        emptyText="Quiet room. Nobody has a concern worth raising before this one."
+      />
     </div>
   );
 }

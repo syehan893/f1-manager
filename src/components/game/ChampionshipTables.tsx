@@ -1,11 +1,9 @@
 import { motion } from 'framer-motion';
+import { useGame } from '@/state/gameContext';
 import { Panel } from '@/components/ui/Panel';
 import { gridTeamOf } from '@/data/grid2026';
-import { GRID_2026_DRIVERS } from '@/data/grid2026';
 import { cx, flagEmoji } from '@/lib/format';
 import type { Standings } from '@/game/types';
-
-const DRIVER_BY_ID = new Map(GRID_2026_DRIVERS.map((driver) => [driver.id, driver]));
 
 interface ChampionshipTablesProps {
   standings: Standings;
@@ -21,6 +19,11 @@ export function ChampionshipTables({
   driverLimit = 10,
   icon,
 }: ChampionshipTablesProps) {
+  const { roster } = useGame();
+  /* Named from the live roster rather than the 2026 data file: a junior
+   * who has been promoted into a seat is not in that file, and would
+   * otherwise render as a raw driver id. */
+  const driverById = new Map(roster.map((driver) => [driver.id, driver]));
   const topDriverPoints = standings.drivers[0]?.points || 1;
   const topTeamPoints = standings.constructors[0]?.points || 1;
 
@@ -29,7 +32,7 @@ export function ChampionshipTables({
       <Panel title="Drivers' Championship" icon={icon}>
         <ul className="space-y-1">
           {standings.drivers.slice(0, driverLimit).map((row) => {
-            const driver = DRIVER_BY_ID.get(row.driverId);
+            const driver = driverById.get(row.driverId);
             const team = gridTeamOf(row.teamId);
             const isPlayer = row.teamId === playerTeamId;
 

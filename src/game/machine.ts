@@ -318,6 +318,7 @@ export function createNewGame(managerName = 'New Manager'): GameState {
       GRID_2026_DRIVERS.map((driver) => [driver.id, blankCondition(driver.id, driver.morale)]),
     ),
     prospects: buildProspects(2026),
+    academyDrivers: [],
     seasonArchive: [],
     pendingGridPenalty: 0,
   };
@@ -505,6 +506,10 @@ function clone(state: GameState): GameState {
       Object.entries(state.driverConditions).map(([key, entry]) => [key, { ...entry }]),
     ),
     prospects: state.prospects.map((entry) => ({
+      ...entry,
+      attributes: { ...entry.attributes },
+    })),
+    academyDrivers: (state.academyDrivers ?? []).map((entry) => ({
       ...entry,
       attributes: { ...entry.attributes },
     })),
@@ -1021,6 +1026,13 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
       // The released driver becomes a free agent rather than vanishing.
       delete next.driverTeams[event.outgoingDriverId];
       next.driverTeams[prospect.id] = next.playerTeamId!;
+
+      /* The intake is rebuilt every season, so a graduate has to be kept
+       * somewhere that survives the new year — otherwise they hold a seat
+       * that names nobody and disappear from every screen. */
+      if (!next.academyDrivers.some((entry) => entry.id === prospect.id)) {
+        next.academyDrivers.push({ ...prospect, attributes: { ...prospect.attributes } });
+      }
 
       if (!next.driverConditions[prospect.id]) {
         // A junior arrives keen and largely unbothered by anything yet.
