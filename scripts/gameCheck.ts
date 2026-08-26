@@ -18,7 +18,7 @@ import { blankCondition, conditionEffects, emotionOf } from '../src/game/driverC
 import { currentSeasonRecord } from '../src/game/seasonArchive';
 import { preRaceBriefing, postRaceBriefing } from '../src/game/briefing';
 import { ROLES } from '../src/data/staff';
-import { staffMarket, staffRndEfficiency, vacantRoles } from '../src/game/staffing';
+import { staffMarket, staffReputationBonus, staffRndEfficiency, vacantRoles } from '../src/game/staffing';
 import { rndEfficiency } from '../src/game/facilities';
 import { buildTracks } from '../src/lib/careerGen';
 import type { GameEvent, GamePhase, GameState } from '../src/game/types';
@@ -1417,6 +1417,93 @@ console.log('\n== briefing room ==');
   );
 
   check('there is no debrief before the race', postRaceBriefing(g, ours).length === 0);
+}
+
+
+console.log('\n== power-unit grid penalty ==');
+
+{
+  let g = createNewGame('Krowten');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'confirm setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview team');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'confirm team');
+  g = must(g, { type: 'START_SEASON' }, 'start season');
+  g = must(g, { type: 'PROCEED_TO_QUALIFYING' }, 'to qualifying');
+
+  const ourIds = Object.entries(g.driverTeams)
+    .filter(([, teamId]) => teamId === g.playerTeamId)
+    .map(([driverId]) => driverId);
+
+  const gTrack = buildTracks(1)[0]!;
+  const clean = simulateQualifying({
+    season: g.season,
+    round: g.round,
+    track: gTrack,
+    drivers: GRID_2026_DRIVERS,
+    driverTeams: g.driverTeams,
+    teams: g.teams,
+    difficulty: g.settings.difficulty,
+    playerTeamId: g.playerTeamId,
+  });
+
+  /* A penalty is only worth having if it actually moves the grid. */
+  const penalised = must(
+    { ...g, pendingGridPenalty: 5 },
+    { type: 'QUALIFYING_COMPLETE', result: clean },
+    'qualifying with a penalty pending',
+  );
+
+  const before = new Map(clean.entries.map((e) => [e.driverId, e.position]));
+  const after = new Map(penalised.qualifying!.entries.map((e) => [e.driverId, e.position]));
+
+  check(
+    'a penalised car actually drops down the grid',
+    ourIds.some((id) => (after.get(id) ?? 0) > (before.get(id) ?? 0)),
+    ourIds.map((id) => `${id} P${before.get(id)}->P${after.get(id)}`).join(' '),
+  );
+  check(
+    'the grid stays 1..n with no holes',
+    penalised.qualifying!.entries
+      .map((e) => e.position)
+      .sort((a, b) => a - b)
+      .every((p, i) => p === i + 1),
+  );
+  check('the penalty is served once, then cleared', penalised.pendingGridPenalty === 0);
+
+  const unpenalised = must(
+    g,
+    { type: 'QUALIFYING_COMPLETE', result: clean },
+    'qualifying with no penalty',
+  );
+  check(
+    'no penalty leaves the order exactly as qualified',
+    unpenalised.qualifying!.entries.every((e, i) => e.position === clean.entries[i]!.position),
+  );
+}
+
+console.log('\n== team principal reputation ==');
+
+{
+  const base = createNewGame('Krowten');
+  const withBoss = {
+    ...base,
+    staff: [
+      {
+        candidateId: 'x',
+        role: 'TEAM_PRINCIPAL' as const,
+        name: 'A. Boss',
+        rating: 95,
+        salary: 9_000_000,
+        signedInSeason: 2026,
+        seasonsRemaining: 3,
+      },
+    ],
+  };
+  check(
+    'a strong principal grows reputation faster than a vacancy',
+    staffReputationBonus(withBoss) > staffReputationBonus(base),
+    `${staffReputationBonus(withBoss).toFixed(2)} vs ${staffReputationBonus(base).toFixed(2)}`,
+  );
 }
 
 console.log(failures === 0 ? '\nAll game-flow checks passed.\n' : `\n${failures} check(s) FAILED.\n`);

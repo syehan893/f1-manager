@@ -47,6 +47,7 @@ import {
   severanceFor,
   staffMarket,
   staffMarketingMultiplier,
+  staffReputationBonus,
   staffBuildTimeReduction,
 } from './staffing';
 import { applyRaceResult, emptyStandings } from './championship';
@@ -86,6 +87,7 @@ import type {
   GameEventType,
   GamePhase,
   GameState,
+  QualifyingEntry,
   RndArea,
   SeasonSettings,
   StrategyPlan,
@@ -227,6 +229,30 @@ export function findVariant(variantId: string): ComponentVariant | undefined {
 export { COMPONENT_CATALOG };
 
 export { DEFAULT_FACILITIES, facilityUpgradeCost };
+
+
+/**
+ * Drops the given drivers a number of grid places and closes the gap
+ * behind them. Positions are renumbered from the resulting order, so the
+ * grid stays 1..n with no holes however many cars are penalised.
+ */
+function applyGridPenalty(
+  entries: QualifyingEntry[],
+  penalisedIds: string[],
+  places: number,
+): QualifyingEntry[] {
+  const order = [...entries].sort((a, b) => a.position - b.position);
+
+  for (const driverId of penalisedIds) {
+    const from = order.findIndex((entry) => entry.driverId === driverId);
+    if (from < 0) continue;
+    const [moved] = order.splice(from, 1);
+    if (!moved) continue;
+    order.splice(Math.min(order.length, from + places), 0, moved);
+  }
+
+  return order.map((entry, index) => ({ ...entry, position: index + 1 }));
+}
 
 export function createNewGame(managerName = 'New Manager'): GameState {
   const now = new Date().toISOString();
@@ -908,7 +934,23 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
     }
 
     case 'QUALIFYING_COMPLETE': {
-      next.qualifying = event.result;
+      /* A power-unit penalty is served here, at the moment the qualifying
+       * order becomes the starting grid. Without this the allocation rule
+       * has no teeth at all: the player could build a fifth engine every
+       * round and never pay the Saturday it is supposed to cost. */
+      if (next.pendingGridPenalty > 0) {
+        next.qualifying = {
+          ...event.result,
+          entries: applyGridPenalty(
+            event.result.entries,
+            playerDriverIds(next),
+            next.pendingGridPenalty,
+          ),
+        };
+        next.pendingGridPenalty = 0;
+      } else {
+        next.qualifying = event.result;
+      }
 
       /* Saturday is the first thing that moves a driver all weekend, and
        * it moves them hard: being out-qualified by a team-mate is the
@@ -1171,11 +1213,20 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
       }
 
       const expected = expectedPositionFor(next, next.playerTeamId);
-      next.managerPerformanceScore = updateManagerScore(
-        next.managerPerformanceScore,
-        event.result,
-        next.playerTeamId,
-        expected,
+      /* A well-regarded principal fronts the team to the paddock, which
+       * is the other half of what that appointment is sold on — the
+       * sponsor multiplier was already wired, this was not. */
+      next.managerPerformanceScore = Math.max(
+        0,
+        Math.min(
+          100,
+          updateManagerScore(
+            next.managerPerformanceScore,
+            event.result,
+            next.playerTeamId,
+            expected,
+          ) + staffReputationBonus(next),
+        ),
       );
 
       const ourFinishes = event.result.finishers.filter(
