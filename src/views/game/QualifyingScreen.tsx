@@ -14,7 +14,7 @@ import { useGame } from '@/state/gameContext';
 
 /** Phase: QUALIFYING — five laps each, best one sets the grid. */
 export function QualifyingScreen() {
-  const { state, dispatch, currentTrack, roster, playerTeam } = useGame();
+  const { state, dispatch, currentTrack, roster, gridRoster, playerTeam } = useGame();
   /* Named from the live roster rather than the 2026 data file: a junior who
    * has been promoted into a seat is not in that file, and would otherwise
    * render as a raw driver id. */
@@ -36,7 +36,9 @@ export function QualifyingScreen() {
       season: state.season,
       round: state.round,
       track: currentTrack,
-      drivers: roster,
+      /* Two cars per team and no more. A reserve is on the books, not on
+       * the entry list, so they do not take a grid slot from anybody. */
+      drivers: gridRoster,
       driverTeams: state.driverTeams,
       teams: state.teams,
       difficulty: state.settings.difficulty,
@@ -47,7 +49,7 @@ export function QualifyingScreen() {
     });
 
     dispatch({ type: 'QUALIFYING_COMPLETE', result: session });
-  }, [state, currentTrack, roster, dispatch]);
+  }, [state, currentTrack, gridRoster, dispatch]);
 
   if (!state || !currentTrack) return null;
 

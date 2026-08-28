@@ -31,7 +31,7 @@ import type { RaceState, TyreCompound } from '@/types';
  * handed over.
  */
 export function CareerRaceProvider({ children }: { children: ReactNode }) {
-  const { state, roster, currentTrack, playerDrivers, dispatch, phase } = useGame();
+  const { state, gridRoster, currentTrack, playerDrivers, dispatch, phase } = useGame();
   /** The round whose result has already been reported, so a finished
    *  race is folded into the championship exactly once. */
   const reportedRound = useRef<string | null>(null);
@@ -40,12 +40,12 @@ export function CareerRaceProvider({ children }: { children: ReactNode }) {
   const qualifyingEntries = state?.qualifying?.entries;
 
   const gridDrivers = useMemo(() => {
-    if (!qualifyingEntries) return roster;
-    const byId = new Map(roster.map((driver) => [driver.id, driver]));
+    if (!qualifyingEntries) return gridRoster;
+    const byId = new Map(gridRoster.map((driver) => [driver.id, driver]));
     return qualifyingEntries
       .map((entry) => byId.get(entry.driverId))
       .filter((driver): driver is NonNullable<typeof driver> => Boolean(driver));
-  }, [qualifyingEntries, roster]);
+  }, [qualifyingEntries, gridRoster]);
 
   const circuit = useMemo(
     () => (currentTrack ? trackToCircuit(currentTrack) : null),
