@@ -1,4 +1,4 @@
-import { GRID_2026_TEAMS, driverRating, gridTeamOf } from '@/data/grid2026';
+import { GRID_2026_TEAMS, carRating, driverRating, gridTeamOf } from '@/data/grid2026';
 import { effectiveDriver } from './driverDevelopment';
 import { GRID_SEATS_PER_TEAM, openSeatsAt, raceDriversOf, squadOf } from './roster';
 import { driverValuation } from './finance';
@@ -50,6 +50,33 @@ function seeded(key: string): number {
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0) / 4294967296;
+}
+
+/**
+ * Where a team sits in the pecking order, 1 is best.
+ *
+ * The constructors' table is the honest answer once anybody has scored.
+ * Before that it is a table of zeroes, and reading positions off it
+ * ranks teams by the order they happen to appear in the data file —
+ * which made the first three entries untouchable in pre-season for no
+ * reason a player could see. Until the championship means something, the
+ * car does.
+ */
+export function peckingOrder(state: GameState, teamId: string): number {
+  const scored = state.standings.constructors.some((row) => row.points > 0);
+  if (scored) {
+    return (
+      state.standings.constructors.find((row) => row.teamId === teamId)?.position ??
+      state.teams.length
+    );
+  }
+
+  const ranked = [...state.teams]
+    .map((team) => ({ teamId: team.teamId, rating: carRating(team.car) }))
+    .sort((a, b) => b.rating - a.rating);
+
+  const index = ranked.findIndex((entry) => entry.teamId === teamId);
+  return index < 0 ? state.teams.length : index + 1;
 }
 
 /* ------------------------------ the deal ------------------------------ */
@@ -109,14 +136,12 @@ export function interestIn(state: GameState, driverId: string, role: DriverRole)
   const toTeamId = state.playerTeamId;
   if (!toTeamId) return 0;
 
-  const standing = (teamId: string) =>
-    state.standings.constructors.find((row) => row.teamId === teamId)?.position ??
-    state.teams.length;
-
-  /* Moving up the constructors' table is the single biggest draw. Ten
-   * places better is a move anybody takes; ten places worse is one
-   * nobody takes without being paid for it. */
-  const climb = fromTeamId ? standing(fromTeamId) - standing(toTeamId) : 4;
+  /* Moving up the order is the single biggest draw. Ten places better is
+   * a move anybody takes; ten places worse is one nobody takes without
+   * being paid for it. */
+  const climb = fromTeamId
+    ? peckingOrder(state, fromTeamId) - peckingOrder(state, toTeamId)
+    : 4;
   let interest = 50 + climb * 4.2;
 
   // A reserve role is a step down unless the team is a genuine step up.
@@ -224,12 +249,9 @@ export function sellability(
    * a fee that lets them replace them. */
   const squad = squadOf(state, fromTeamId);
   if (squad.length <= GRID_SEATS_PER_TEAM) {
-    const standing =
-      state.standings.constructors.find((row) => row.teamId === fromTeamId)?.position ??
-      state.teams.length;
-    /* A team at the front of the championship is not selling either of
-     * its drivers mid-season at any price. */
-    if (standing <= 3) {
+    /* A team at the front is not selling either of its drivers at any
+     * price. Everybody else will at least take the call. */
+    if (peckingOrder(state, fromTeamId) <= 3) {
       return {
         willing: false,
         reason: `${gridTeamOf(fromTeamId).name} will not discuss either of their race drivers.`,

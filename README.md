@@ -281,6 +281,20 @@ choice: the job market rewards over-delivering.
 pit crew, plus straight driver swaps with any team on the grid. A
 prominent **Start Season** button sits top-right.
 
+**Driver Market** — the squad, the market and the talks. See *Squads and
+the entry list* and *Signing drivers* below.
+
+**Mail** — the inbox. Results, board messages, driver complaints, contract
+talks and rival bids all land here, and a message carrying a decision is
+answered from the inbox rather than from the screen it came from. The
+unread count sits on the sidebar.
+
+**Social** — the paddock talking out loud: qualifying and race reaction,
+transfers, team news, driver moods and rumour, posted by drivers, teams
+and recurring press and fan voices. Generated from what actually happened
+in the save and deterministic on it, so a reload cannot reroll the
+paddock's opinion of you.
+
 **Manager Hub** — next Grand Prix, both championship tables, and the job
 market: every rival team's open role, budget, required rating and salary.
 Applications are judged against `managerPerformanceScore`, which moves
@@ -401,6 +415,68 @@ screen — and `npm run game:check` asserts that rule so it cannot regress.
 The calendar remains editable only in `PRE_SEASON`.
 
 ---
+
+## Squads and the entry list
+
+A team's drivers and a team's cars are two different lists.
+
+`driverTeams` is squad membership — a team may hold up to four drivers.
+`lineups` is the running order within a squad, and the first two names in
+it are the cars that take the grid. Everybody after them is a reserve:
+under contract, paid out of the same wage bill, and not entered on Sunday.
+
+That separation is what makes promotion mean promotion. Signing a junior
+adds him to the squad — he takes a race seat if one is free and goes on
+the bench if not, and nobody is released unless you name somebody to
+release. Promoting a reserve moves him into the car and drops the second
+race driver to the bench, still under contract and available again next
+weekend.
+
+Qualifying and the race are run from the entry list (`gridDriverIds`), so
+a reserve never takes a grid slot off anybody and no team ever enters
+more than two cars. Championship rows are built from whoever actually
+raced, so points a reserve scored during a call-up stay on the
+leaderboard afterwards. `src/game/roster.ts` owns all of it.
+
+## Signing drivers
+
+A move has parties and prices rather than a single number to accept.
+
+Approach a driver and he names his terms; his team names a fee. An offer
+that satisfies neither comes back as a counter, and three refusals end
+the conversation. How keen he is on the move is worth real money — up to
+20% either side of his asking salary — and it moves with the car on
+offer, whether there is a race seat at the end of it, his morale, how
+long is left on his deal and your own standing as a manager.
+
+Contracts are live: a salary, a term and a release clause, wound down a
+year at a time. Drivers can be renewed, released and offered out, and
+rivals bid for yours between rounds — readily once you have made somebody
+available, and unprompted when they are having a strong season. Teams
+that have stopped counting on a driver shop him to you the same way.
+`src/game/contracts.ts` owns the negotiation; `src/game/paddockFeed.ts`
+turns the outcome into mail and posts.
+
+Everything is deterministic on (season, round, driverId), so reloading
+cannot fish for a better answer out of the same conversation.
+
+## The pit wall owns the compound
+
+Two rules pull in opposite directions and the engine keeps them apart.
+
+A plan nobody has looked at since Saturday is reconciled with the track:
+nobody starts a downpour on slicks because a dry race was written down,
+and a car that stays on wets after the track dries has thrown the race
+away. But a compound the pit wall calls for during the race is a
+decision, and it is fitted exactly as asked — including inters in
+standing water or full wets on a drying track, which is a real strategic
+gamble. `compoundToFit` in `src/game/weather.ts` is the seam.
+
+The queue lives on `CarState.nextCompound`, where the radio panel reads
+it, rather than in a copy the panel keeps for itself; the AI's compound
+rotation never touches a car the pit wall runs. And a team has one crew
+and one box, so two cars called in together are stacked — the second
+waits for the first rather than both being served at once.
 
 ## Grid bookkeeping (the pole-sitter bug)
 
