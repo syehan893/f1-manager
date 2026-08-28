@@ -416,6 +416,8 @@ export type ViewId =
   | 'career-market'
   | 'career-rnd'
   | 'career-calendar'
+  | 'career-mail'
+  | 'career-social'
   /* Account */
   | 'settings'
   | 'profile';

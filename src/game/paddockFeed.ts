@@ -557,7 +557,9 @@ export function rumourPosts(state: GameState): void {
 /** Standings, form and the shape of the championship. */
 export function championshipPosts(state: GameState): void {
   const leader = state.standings.constructors[0];
-  if (!leader || state.round < 3) return;
+  /* Called once the round's race has been scored, so `round` is how many
+   * have actually been run. One is enough for a table to exist. */
+  if (!leader || state.round < 1 || leader.points === 0) return;
 
   const team = GRID_2026_TEAMS.find((entry) => entry.id === leader.teamId);
   if (!team) return;
@@ -567,7 +569,7 @@ export function championshipPosts(state: GameState): void {
     PUNDITS,
     `${state.season}:${state.round}:standings`,
     'TEAM',
-    `${team.name} lead the constructors' after ${state.round - 1} rounds on ${leader.points}. ${
+    `${team.name} lead the constructors' after ${state.round} round${state.round === 1 ? '' : 's'} on ${leader.points}. ${
       (state.standings.constructors[1]?.points ?? 0) + 25 < leader.points
         ? 'This is turning into a procession.'
         : 'It is still very much on.'

@@ -6,6 +6,8 @@ import {
   Check,
   ChevronRight,
   Gauge,
+  Inbox,
+  Radio,
   Trophy,
   X,
 } from 'lucide-react';
@@ -21,10 +23,12 @@ import { ROLE_LABEL, jobOpenings } from '@/game/jobMarket';
 import { scaledLaps } from '@/game/trackAdapter';
 import { gridTeamOf } from '@/data/grid2026';
 import { cx, flagEmoji, formatCurrency } from '@/lib/format';
+import { unreadCount } from '@/game/mail';
 import { useGame } from '@/state/gameContext';
+import type { ViewId } from '@/types';
 
 /** Phase: HUB — the screen between races. */
-export function HubScreen() {
+export function HubScreen({ onNavigate }: { onNavigate?: (view: ViewId) => void }) {
   const { state, dispatch, playerTeam, currentTrack, calendar } = useGame();
 
   const openings = useMemo(() => (state ? jobOpenings(state) : []), [state]);
@@ -36,6 +40,9 @@ export function HubScreen() {
   const seasonComplete = state.round > state.settings.seasonLength;
 
   const latestApplication = state.jobApplications[0];
+  const unread = unreadCount(state.mail);
+  const latestMail = state.mail.find((message) => !message.read) ?? state.mail[0];
+  const latestPost = state.social[0];
 
   return (
     <div className="mx-auto w-full max-w-6xl px-4 py-6">
@@ -110,6 +117,51 @@ export function HubScreen() {
             <p className={cx('mt-1 font-mono text-lg font-bold', stat.tone)}>{stat.value}</p>
           </div>
         ))}
+      </div>
+
+      {/* What the paddock has been saying since the last round. Both of
+          these move whether or not the player looks at them, so the hub
+          has to say so rather than leaving them to be discovered. */}
+      <div className="mb-4 grid gap-3 sm:grid-cols-2">
+        <button
+          type="button"
+          onClick={() => onNavigate?.('career-mail')}
+          className={cx(
+            'flex items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors',
+            unread > 0
+              ? 'border-neon-red/40 bg-neon-red/[0.07] hover:bg-neon-red/[0.12]'
+              : 'border-carbon-600/70 bg-carbon-850/70 hover:border-carbon-500',
+          )}
+        >
+          <Inbox className={cx('size-4 shrink-0', unread > 0 ? 'text-neon-red' : 'text-chrome-500')} />
+          <span className="min-w-0 flex-1">
+            <span className="block text-[11px] font-bold text-chrome-100">Mail</span>
+            <span className="block truncate text-[10px] text-chrome-500">
+              {unread > 0
+                ? `${unread} unread — ${latestMail?.subject ?? 'something needs answering'}`
+                : 'Nothing waiting on you'}
+            </span>
+          </span>
+          {unread > 0 && (
+            <Badge tone="red" mono>
+              {unread}
+            </Badge>
+          )}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onNavigate?.('career-social')}
+          className="flex items-center gap-3 rounded-lg border border-carbon-600/70 bg-carbon-850/70 px-3 py-2.5 text-left transition-colors hover:border-carbon-500"
+        >
+          <Radio className="size-4 shrink-0 text-chrome-500" />
+          <span className="min-w-0 flex-1">
+            <span className="block text-[11px] font-bold text-chrome-100">Social</span>
+            <span className="block truncate text-[10px] text-chrome-500">
+              {latestPost ? `@${latestPost.handle}: ${latestPost.text}` : 'Quiet out there'}
+            </span>
+          </span>
+        </button>
       </div>
 
       <div className="grid gap-4">

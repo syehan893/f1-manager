@@ -30,7 +30,7 @@ function ScreenForPhase({
     case 'PRE_SEASON':
       return <PreSeasonScreen />;
     case 'HUB':
-      return <HubScreen />;
+      return <HubScreen onNavigate={onNavigate} />;
     case 'QUALIFYING':
       return <QualifyingScreen />;
     case 'RACE_STRATEGY':

@@ -1,6 +1,7 @@
 import { motion } from 'framer-motion';
 import { NAV_GROUPS, NAV_GROUP_LABEL, navItemsFor } from './navItems';
 import { isRacePhase } from '@/game/phases';
+import { unreadCount } from '@/game/mail';
 import { cx } from '@/lib/format';
 import { useGame } from '@/state/gameContext';
 import type { ViewId } from '@/types';
@@ -13,6 +14,10 @@ interface SidebarProps {
 export function Sidebar({ active, onNavigate }: SidebarProps) {
   const { phase, state, origin } = useGame();
   const racing = isRacePhase(phase);
+  /* Unanswered post is the one thing in the sidebar with a deadline on
+   * it — a bid for a driver expires at the next round whether or not the
+   * player found the screen. */
+  const unread = unreadCount(state?.mail ?? []);
 
   return (
     <aside
@@ -101,6 +106,11 @@ export function Sidebar({ active, onNavigate }: SidebarProps) {
                         <span className="absolute -top-1 -right-1 flex size-2">
                           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-neon-red opacity-70" />
                           <span className="relative inline-flex size-2 rounded-full bg-neon-red" />
+                        </span>
+                      )}
+                      {item.id === 'career-mail' && unread > 0 && (
+                        <span className="absolute -top-1.5 -right-2 grid min-w-4 place-items-center rounded-full bg-neon-red px-1 font-mono text-[8px] leading-4 font-bold text-carbon-950">
+                          {unread > 9 ? '9+' : unread}
                         </span>
                       )}
                     </span>
