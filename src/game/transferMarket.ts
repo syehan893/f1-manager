@@ -1,5 +1,6 @@
 import { GRID_2026_TEAMS, driverRating } from '@/data/grid2026';
 import { effectiveDriver } from './driverDevelopment';
+import { joinSquad, leaveSquad, raceDriversOf } from './roster';
 import type { GameState, TransferMove } from './types';
 
 /* =====================================================================
@@ -212,13 +213,36 @@ export function runSillySeason(state: GameState): TransferMove[] {
 /** Applies the moves to a save's seat map. Mutates, so pass a clone. */
 export function applyTransferMoves(state: GameState, moves: TransferMove[]): void {
   for (const move of moves) {
-    state.driverTeams[move.incomingDriverId] = move.toTeamId;
+    /* Through the roster helpers rather than by writing the seat map
+     * directly, so each team's running order is rewritten with the move
+     * instead of quietly keeping the departed driver's name in it
+     * forever. The incoming driver lands in the seat the outgoing one
+     * vacated, which is what a straight swap means. */
+    leaveSquad(state, move.outgoingDriverId);
+    leaveSquad(state, move.incomingDriverId);
+    joinSquad(state, move.incomingDriverId, move.toTeamId);
 
-    if (move.fromTeamId) {
-      state.driverTeams[move.outgoingDriverId] = move.fromTeamId;
-    } else {
-      // Nowhere to go: the seat is lost and they leave the grid.
-      delete state.driverTeams[move.outgoingDriverId];
+    // Nowhere to go means the seat is lost and they leave the grid.
+    if (move.fromTeamId) joinSquad(state, move.outgoingDriverId, move.fromTeamId);
+
+    /* Contracts follow the driver. A deal that named the old team would
+     * bill the wrong books and price the next negotiation wrongly. */
+    const incomingDeal = state.deals?.[move.incomingDriverId];
+    if (incomingDeal) {
+      incomingDeal.teamId = move.toTeamId;
+      incomingDeal.role = raceDriversOf(state, move.toTeamId).includes(move.incomingDriverId)
+        ? 'RACE'
+        : 'RESERVE';
+    }
+    const outgoingDeal = state.deals?.[move.outgoingDriverId];
+    if (outgoingDeal) {
+      if (!move.fromTeamId) delete state.deals[move.outgoingDriverId];
+      else {
+        outgoingDeal.teamId = move.fromTeamId;
+        outgoingDeal.role = raceDriversOf(state, move.fromTeamId).includes(move.outgoingDriverId)
+          ? 'RACE'
+          : 'RESERVE';
+      }
     }
 
     /* A junior promoted by a rival has to be kept durably too — the

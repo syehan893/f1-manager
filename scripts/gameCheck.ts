@@ -21,6 +21,14 @@ import { ROLES } from '../src/data/staff';
 import { staffMarket, staffReputationBonus, staffRndEfficiency, vacantRoles } from '../src/game/staffing';
 import { rndEfficiency } from '../src/game/facilities';
 import { buildTracks } from '../src/lib/careerGen';
+import {
+  MAX_SQUAD_SIZE,
+  gridDriverIds,
+  raceDriversOf,
+  reserveDriversOf,
+  squadOf,
+} from '../src/game/roster';
+import { rivalBids, sellability } from '../src/game/contracts';
 import type { GameEvent, GamePhase, GameState } from '../src/game/types';
 
 let failures = 0;
@@ -1614,6 +1622,426 @@ console.log('\n== academy graduates are priced properly ==');
     'a graduate resolves as a real driver',
     Boolean(effectiveDriver(withGraduate, prospect.id)),
   );
+}
+
+/* ---------------------------------------------------------------------
+ * Squads, seats and the entry list
+ *
+ * A team's drivers and a team's cars used to be the same list, so
+ * promoting anybody meant somebody else was written out of the door in
+ * the same breath. These are the assertions that say that is over.
+ * ------------------------------------------------------------------- */
+
+console.log('\n== a squad can be more than two ==');
+
+{
+  let g = createNewGame('Squad Test');
+  g = must(g, { type: 'SET_SETTINGS', settings: { seasonLength: 4 } }, 'settings');
+  g = must(g, { type: 'SET_MANAGER_NAME', name: 'Squad Test' }, 'name');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'confirm');
+
+  const startingSquad = squadOf(g, 'williams');
+  check('a team starts on two drivers', startingSquad.length === 2, String(startingSquad.length));
+
+  /* Signing a junior with a full line-up must ADD him, not swap anybody
+   * out. This is the bug in one assertion. */
+  const junior = g.prospects[0]!;
+  g = must(g, { type: 'SIGN_PROSPECT', prospectId: junior.id }, 'sign a junior');
+
+  const grownSquad = squadOf(g, 'williams');
+  check(
+    'signing a junior grows the squad rather than replacing anybody',
+    grownSquad.length === 3,
+    `${grownSquad.length} under contract`,
+  );
+  check(
+    'and nobody who was already there has been shown the door',
+    startingSquad.every((driverId) => g.driverTeams[driverId] === 'williams'),
+  );
+  check(
+    'the junior joins the bench, because both cars were taken',
+    reserveDriversOf(g, 'williams').includes(junior.id),
+  );
+  check('the entry list is still two cars', raceDriversOf(g, 'williams').length === 2);
+
+  /* Promoting him must move him into the car and move the second race
+   * driver on to the bench — not out of the team. */
+  const before = raceDriversOf(g, 'williams');
+  g = must(g, { type: 'PROMOTE_DRIVER', driverId: junior.id }, 'promote the junior');
+
+  const after = raceDriversOf(g, 'williams');
+  check('promotion puts him in the car', after.includes(junior.id));
+  check('the team leader keeps his seat', after[0] === before[0], `${after[0]}`);
+  check(
+    'the driver he displaced is on the bench, not out of the team',
+    g.driverTeams[before[1]!] === 'williams' &&
+      reserveDriversOf(g, 'williams').includes(before[1]!),
+  );
+  check('the squad is the same size after a promotion', squadOf(g, 'williams').length === 3);
+  check('and the entry list is still two cars', after.length === 2);
+
+  // Benching works the other way, and pulls the first reserve up with it.
+  g = must(g, { type: 'DEMOTE_DRIVER', driverId: junior.id }, 'bench the junior');
+  check(
+    'benching a race driver promotes the first reserve',
+    raceDriversOf(g, 'williams').length === 2 &&
+      !raceDriversOf(g, 'williams').includes(junior.id),
+  );
+  check('and nobody left the team doing it', squadOf(g, 'williams').length === 3);
+
+  /* The floor: a team can never be run down to one car. */
+  const twoLeft = { ...g, driverTeams: { ...g.driverTeams } };
+  delete twoLeft.driverTeams[junior.id];
+  const cannotBench = transition(twoLeft, {
+    type: 'DEMOTE_DRIVER',
+    driverId: raceDriversOf(twoLeft, 'williams')[1]!,
+  });
+  check('you cannot bench your way down to one car', !cannotBench.ok, cannotBench.message ?? '');
+
+  // And a squad has a ceiling, so a bench cannot become a reserve league.
+  let full = g;
+  for (const prospect of g.prospects.slice(1)) {
+    const attempt = transition(full, { type: 'SIGN_PROSPECT', prospectId: prospect.id });
+    if (!attempt.ok || !attempt.state) {
+      check(
+        'the squad has a ceiling',
+        squadOf(full, 'williams').length === MAX_SQUAD_SIZE,
+        attempt.message ?? '',
+      );
+      break;
+    }
+    full = attempt.state;
+  }
+}
+
+console.log('\n== the grid is capped at two cars per team ==');
+
+{
+  let g = createNewGame('Grid Test');
+  g = must(g, { type: 'SET_MANAGER_NAME', name: 'Grid Test' }, 'name');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'confirm');
+
+  const junior = g.prospects[0]!;
+  g = must(g, { type: 'SIGN_PROSPECT', prospectId: junior.id }, 'sign a junior');
+
+  const entryList = gridDriverIds(g);
+  check(
+    'no team enters more than two cars',
+    [...new Set(Object.values(g.driverTeams))].every(
+      (teamId) => entryList.filter((driverId) => g.driverTeams[driverId] === teamId).length <= 2,
+    ),
+  );
+  check(
+    'the reserve is on the books but not on the entry list',
+    Boolean(g.driverTeams[junior.id]) && !entryList.includes(junior.id),
+  );
+  check(
+    'the entry list is smaller than the payroll',
+    entryList.length < Object.keys(g.driverTeams).length,
+    `${entryList.length} entered, ${Object.keys(g.driverTeams).length} contracted`,
+  );
+
+  /* Qualifying is run from the entry list, so a reserve can never take a
+   * grid slot off somebody. */
+  const track = buildTracks(4)[0]!;
+  const byId = new Map(GRID_2026_DRIVERS.map((d) => [d.id, d]));
+  const quali = simulateQualifying({
+    season: g.season,
+    round: g.round,
+    track,
+    drivers: entryList.map((id) => byId.get(id)).filter((d): d is NonNullable<typeof d> => Boolean(d)),
+    driverTeams: g.driverTeams,
+    teams: g.teams,
+    difficulty: g.settings.difficulty,
+    playerTeamId: g.playerTeamId,
+  });
+  check(
+    'qualifying never runs a third car for anybody',
+    GRID_2026_TEAMS.every(
+      (team) => quali.entries.filter((entry) => entry.teamId === team.id).length <= 2,
+    ),
+  );
+
+  /* A reserve who has never started does not belong in the drivers'
+   * table — the championship lists people who have raced, not people
+   * who are employed. What matters is the moment he does race. */
+  check(
+    'a reserve who has never started is not in the table',
+    !g.standings.drivers.some((row) => row.driverId === junior.id),
+  );
+
+  const withPoints = applyRaceResult(g.standings, {
+    season: g.season,
+    round: 1,
+    trackId: track.id,
+    totalLaps: 20,
+    completedAt: new Date().toISOString(),
+    finishers: [
+      {
+        position: 1,
+        driverId: junior.id,
+        teamId: 'williams',
+        gridPosition: 4,
+        points: 25,
+        positionsGained: 3,
+        status: 'FINISHED' as const,
+        fastestLap: false,
+        bestLapMs: 80_000,
+        gapToWinnerMs: 0,
+      },
+    ],
+  });
+  check(
+    'but the moment he scores, the points are on the leaderboard',
+    (withPoints.drivers.find((row) => row.driverId === junior.id)?.points ?? 0) === 25,
+  );
+  check(
+    'and the row is ranked, not appended at the bottom',
+    withPoints.drivers[0]?.driverId === junior.id,
+  );
+}
+
+/* ---------------------------------------------------------------------
+ * Signing, contracts and the market
+ * ------------------------------------------------------------------- */
+
+console.log('\n== approaching and signing a driver ==');
+
+{
+  let g = createNewGame('Market Test');
+  g = must(g, { type: 'SET_MANAGER_NAME', name: 'Market Test' }, 'name');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'confirm');
+
+  // Somebody at a midfield team, so the seller will actually deal.
+  const target = GRID_2026_DRIVERS.find(
+    (d) => g.driverTeams[d.id] && g.driverTeams[d.id] !== 'williams' && sellability(g, d.id).willing,
+  )!;
+
+  const approached = transition(g, { type: 'APPROACH_DRIVER', driverId: target.id });
+  check('an approach opens talks', approached.ok, approached.message ?? '');
+  if (approached.state) g = approached.state;
+
+  const talks = g.negotiations[0];
+  check('the driver names his terms', Boolean(talks?.asking.salary), String(talks?.asking.salary));
+  check('and it lands in the inbox', g.mail.some((m) => m.negotiationId === talks?.id));
+
+  if (talks && talks.stage !== 'REJECTED') {
+    // A derisory offer has to come back as a counter, not a signature.
+    const lowball = transition(g, {
+      type: 'OFFER_CONTRACT',
+      negotiationId: talks.id,
+      offer: { ...talks.asking, salary: 1, signingBonus: 0, transferFee: 0 },
+    });
+    check('a lowball offer is not accepted', lowball.ok && lowball.state != null);
+    if (lowball.state) {
+      const after = lowball.state.negotiations.find((n) => n.id === talks.id);
+      check(
+        'it comes back as a counter rather than a signature',
+        lowball.state.driverTeams[target.id] !== 'williams' && (after?.rejections ?? 0) === 1,
+      );
+      check(
+        'and the counter reaches the inbox',
+        lowball.state.mail.some((m) => m.subject.includes('Counter-offer')),
+      );
+    }
+
+    /* Meeting the asking price signs him — and he joins the squad
+     * without displacing either race driver. */
+    const rich = { ...g, teams: g.teams.map((t) => ({ ...t, budget: 400_000_000 })) };
+    const signed = transition(rich, {
+      type: 'OFFER_CONTRACT',
+      negotiationId: talks.id,
+      offer: { ...talks.asking, salary: talks.asking.salary * 2, transferFee: talks.asking.transferFee * 2 },
+    });
+    check('meeting the terms signs him', signed.ok, signed.message ?? '');
+    if (signed.state) {
+      check('he is on our books', signed.state.driverTeams[target.id] === 'williams');
+      check(
+        'on a real contract',
+        (signed.state.deals[target.id]?.seasonsRemaining ?? 0) > 0,
+        `${signed.state.deals[target.id]?.seasonsRemaining} seasons`,
+      );
+      check(
+        'and the squad grew rather than swapping anybody out',
+        squadOf(signed.state, 'williams').length === 3,
+        `${squadOf(signed.state, 'williams').length} under contract`,
+      );
+      check(
+        'the signing is announced in the mail and on the feed',
+        signed.state.mail.some((m) => m.subject.startsWith('Signed:')) &&
+          signed.state.social.some((post) => post.topic === 'TRANSFER'),
+      );
+      check(
+        'and the fee actually left the bank',
+        (signed.state.teams.find((t) => t.teamId === 'williams')?.budget ?? 0) < 400_000_000,
+      );
+    }
+  }
+
+  /* Offering a driver out, and answering a bid for one. */
+  const junior = g.prospects[0]!;
+  g = must(g, { type: 'SIGN_PROSPECT', prospectId: junior.id }, 'sign a junior');
+  const listed = transition(g, {
+    type: 'LIST_DRIVER',
+    driverId: junior.id,
+    askingFee: 4_000_000,
+  });
+  check('a driver can be offered out', listed.ok, listed.message ?? '');
+  if (listed.state) {
+    g = listed.state;
+    check('the listing is on the record', g.transferList.length === 1);
+
+    const bids = rivalBids(g);
+    check('rivals come in for a listed driver', bids.length > 0, `${bids.length} bids`);
+
+    const bid = bids.find((entry) => entry.driverId === junior.id);
+    if (bid) {
+      const withBid = { ...g, transferOffers: [bid] };
+      const sold = transition(withBid, { type: 'RESPOND_TO_BID', offerId: bid.id, accept: true });
+      check('a bid can be accepted', sold.ok, sold.message ?? '');
+      if (sold.state) {
+        check('the driver leaves', sold.state.driverTeams[junior.id] === bid.fromTeamId);
+        check(
+          'the fee is banked',
+          (sold.state.teams.find((t) => t.teamId === 'williams')?.budget ?? 0) >
+            (g.teams.find((t) => t.teamId === 'williams')?.budget ?? 0),
+        );
+        check(
+          'and the buying team is still on two cars',
+          raceDriversOf(sold.state, bid.fromTeamId).length === 2,
+        );
+      }
+
+      const declined = transition(withBid, {
+        type: 'RESPOND_TO_BID',
+        offerId: bid.id,
+        accept: false,
+      });
+      check(
+        'turning a bid down keeps the driver',
+        declined.ok && declined.state?.driverTeams[junior.id] === 'williams',
+      );
+    }
+  }
+
+  /* A team cannot be sold down below two cars, whatever the fee. */
+  const bare = createNewGame('Bare');
+  const bareWithTeam = { ...bare, playerTeamId: 'williams', phase: 'HUB' as const };
+  const ourTwo = raceDriversOf(bareWithTeam, 'williams');
+  const cannotList = transition(bareWithTeam, {
+    type: 'LIST_DRIVER',
+    driverId: ourTwo[0]!,
+    askingFee: 1_000_000,
+  });
+  check('you cannot sell down to one car', !cannotList.ok, cannotList.message ?? '');
+}
+
+/* ---------------------------------------------------------------------
+ * Mail and social
+ * ------------------------------------------------------------------- */
+
+console.log('\n== the inbox ==');
+
+{
+  let g = createNewGame('Mail Test');
+  g = must(g, { type: 'SET_MANAGER_NAME', name: 'Mail Test' }, 'name');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'confirm');
+  g = must(g, { type: 'START_SEASON' }, 'start season');
+  g = must(g, { type: 'PROCEED_TO_QUALIFYING' }, 'to qualifying');
+
+  const track = buildTracks(g.settings.seasonLength)[0]!;
+  const entered = gridDriverIds(g);
+  const byId = new Map(GRID_2026_DRIVERS.map((d) => [d.id, d]));
+  const quali = simulateQualifying({
+    season: g.season,
+    round: g.round,
+    track,
+    drivers: entered.map((id) => byId.get(id)).filter((d): d is NonNullable<typeof d> => Boolean(d)),
+    driverTeams: g.driverTeams,
+    teams: g.teams,
+    difficulty: g.settings.difficulty,
+    playerTeamId: g.playerTeamId,
+  });
+  g = must(g, { type: 'QUALIFYING_COMPLETE', result: quali }, 'store qualifying');
+
+  check('qualifying files a report', g.mail.some((m) => m.category === 'RESULT'));
+  check('and the paddock talks about it', g.social.some((p) => p.topic === 'QUALIFYING'));
+
+  const unreadBefore = g.mail.filter((m) => !m.read).length;
+  check('new post arrives unread', unreadBefore > 0, String(unreadBefore));
+
+  const first = g.mail[0]!;
+  g = must(g, { type: 'READ_MAIL', mailId: first.id }, 'read one');
+  check('reading marks it read', g.mail.find((m) => m.id === first.id)?.read === true);
+
+  g = must(g, { type: 'READ_ALL_MAIL' }, 'read all');
+  check('mark-all clears the badge', g.mail.every((m) => m.read));
+
+  g = must(g, { type: 'DELETE_MAIL', mailId: first.id }, 'delete one');
+  check('deleting removes it', !g.mail.some((m) => m.id === first.id));
+
+  // Reading the post is legal even mid-race, when nothing else is.
+  check(
+    'the inbox is readable during a session',
+    canDispatch('RACE_SESSION', 'READ_MAIL'),
+  );
+
+  /* The race writes its own report, and a win reaches the board. */
+  g = must(g, { type: 'PROCEED_TO_RACE' }, 'to strategy');
+  const ours = raceDriversOf(g, 'williams');
+  for (const driverId of ours) {
+    g = must(g, { type: 'SET_STARTING_TYRE', driverId, compound: 'MEDIUM' }, 'tyres');
+  }
+  g = must(g, { type: 'CONFIRM_STRATEGY' }, 'confirm strategy');
+  g = must(g, { type: 'COUNTDOWN_COMPLETE' }, 'lights out');
+
+  const order = quali.entries.map((entry) => entry.driverId);
+  // Put one of ours on top, so the board has something to write about.
+  const winnerFirst = [ours[0]!, ...order.filter((id) => id !== ours[0])];
+  const raceResult = scoreRace({
+    season: g.season,
+    round: g.round,
+    trackId: track.id,
+    totalLaps: 20,
+    order: winnerFirst,
+    driverTeams: g.driverTeams,
+    gridPositions: Object.fromEntries(quali.entries.map((e) => [e.driverId, e.position])),
+    bestLaps: Object.fromEntries(winnerFirst.map((id) => [id, 80_000])),
+    retired: new Set<string>(),
+    gaps: Object.fromEntries(winnerFirst.map((id, i) => [id, i * 900])),
+    fastestLapPoint: true,
+  });
+  g = must(g, { type: 'RACE_COMPLETE', result: raceResult }, 'race complete');
+
+  check('the race files a report', g.mail.some((m) => m.subject.startsWith('Round 1')));
+  check('a win reaches the board', g.mail.some((m) => m.category === 'BOARD'));
+  check('and the feed covers the race', g.social.some((p) => p.topic === 'RACE'));
+
+  /* Between rounds the paddock keeps moving: rivals ring up, drivers
+   * say how they are finding it, the press files copy. */
+  const beforeSocial = g.social.length;
+  g = must(g, { type: 'CONTINUE_TO_NEXT_WEEK' }, 'next week');
+  check(
+    'the feed keeps moving between rounds',
+    g.social.length > beforeSocial,
+    `${beforeSocial} -> ${g.social.length}`,
+  );
+
+  /* Every post carries its own engagement, fixed to the post. */
+  const ids = new Set(g.social.map((p) => p.id));
+  check('no two posts share an id', ids.size === g.social.length);
+  check('posts carry engagement', g.social.every((p) => p.likes > 0 && p.reposts > 0));
+
+  const mailIds = new Set(g.mail.map((m) => m.id));
+  check('no two messages share an id', mailIds.size === g.mail.length);
 }
 
 console.log(failures === 0 ? '\nAll game-flow checks passed.\n' : `\n${failures} check(s) FAILED.\n`);

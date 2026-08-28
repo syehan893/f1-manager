@@ -22,6 +22,7 @@ import {
   roundOperatingCost,
   roundRetainer,
   roundWageBill,
+  seasonWageBill,
 } from '@/game/finance';
 import { carRating, driverRating, gridTeamOf } from '@/data/grid2026';
 import { cx, flagEmoji, formatCurrency } from '@/lib/format';
@@ -32,7 +33,7 @@ import type { ViewId } from '@/types';
 
 /** Team — your constructor as it stands in the save. */
 export function TeamView({ onNavigate }: { onNavigate: (view: ViewId) => void }) {
-  const { state, playerTeam, playerDrivers, dispatch } = useGame();
+  const { state, playerTeam, playerDrivers, playerSquad, dispatch } = useGame();
 
   if (!state || !playerTeam) return null;
 
@@ -40,10 +41,10 @@ export function TeamView({ onNavigate }: { onNavigate: (view: ViewId) => void })
   if (!team) return null;
 
   const wcc = state.standings.constructors.find((row) => row.teamId === playerTeam.id);
-  const driverWages = playerDrivers.reduce(
-    (sum, driver) => sum + driver.contract.salaryPerSeason,
-    0,
-  );
+  /* The whole squad, not the entry list — a reserve is paid whether or
+   * not he starts, and a wage bill that quietly omitted him would
+   * disagree with the ledger that charges for him. */
+  const driverWages = seasonWageBill(state);
   const rating = carRating(team.car);
 
   /* Finance derivations. These are the same functions the reducer uses to
@@ -99,7 +100,11 @@ export function TeamView({ onNavigate }: { onNavigate: (view: ViewId) => void })
         {/* Race drivers */}
         <div className="mt-5 border-t border-carbon-600/60 pt-4">
           <div className="mb-3 flex items-center justify-between">
-            <p className="eyebrow">Race Drivers</p>
+            <p className="eyebrow">
+              Squad
+              {playerSquad.length > playerDrivers.length &&
+                ` — ${playerDrivers.length} racing, ${playerSquad.length - playerDrivers.length} in reserve`}
+            </p>
             <button
               type="button"
               onClick={() => onNavigate('drivers')}
@@ -110,15 +115,29 @@ export function TeamView({ onNavigate }: { onNavigate: (view: ViewId) => void })
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
-            {playerDrivers.map((driver) => (
+            {playerSquad.map((driver, index) => {
+              const racing = index < playerDrivers.length;
+              return (
               <div
                 key={driver.id}
-                className="flex items-center gap-3 rounded-lg border border-carbon-600/70 bg-carbon-900/40 p-3"
+                className={cx(
+                  'flex items-center gap-3 rounded-lg border p-3',
+                  racing
+                    ? 'border-carbon-600/70 bg-carbon-900/40'
+                    : 'border-carbon-700 bg-carbon-900/20',
+                )}
               >
                 <DriverPortrait driver={driver} teamColor={playerTeam.color} size={52} />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-[13px] font-bold text-chrome-100">
-                    {driver.firstName} {driver.lastName}
+                  <p className="flex items-center gap-1.5 text-[13px] font-bold text-chrome-100">
+                    <span className="truncate">
+                      {driver.firstName} {driver.lastName}
+                    </span>
+                    {!racing && (
+                      <Badge tone="neutral" mono>
+                        Reserve
+                      </Badge>
+                    )}
                   </p>
                   <p className="text-[10px] text-chrome-500">
                     {flagEmoji(driver.countryCode)} #{driver.carNumber} · Age {driver.age}
@@ -139,7 +158,8 @@ export function TeamView({ onNavigate }: { onNavigate: (view: ViewId) => void })
                   </div>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </Panel>

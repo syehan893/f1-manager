@@ -125,14 +125,32 @@ export function canAfford(state: GameState, amount: number): boolean {
 
 /* ---------------------------- running costs --------------------------- */
 
-/** Combined driver salary bill for the season, for the player's team. */
+/**
+ * What one driver is actually paid.
+ *
+ * A signed deal is the truth when there is one; the data file's figure
+ * is only a starting point, and an academy graduate has no entry there
+ * at all — without this they raced for nothing, which quietly made a
+ * junior the cheapest way to run a team forever.
+ */
+export function salaryOf(state: GameState, driverId: string): number {
+  const deal = state.deals?.[driverId];
+  if (deal) return deal.salary;
+  const driver = DRIVER_BY_ID[driverId] ?? academyDriverOf(state, driverId);
+  return driver?.contract.salaryPerSeason ?? 0;
+}
+
+/**
+ * Combined driver salary bill for the season, for the player's team.
+ *
+ * The whole squad, not the entry list: a reserve driver is paid whether
+ * or not they start on Sunday, and that cost is the thing that makes
+ * keeping a deep bench a real decision rather than a free one.
+ */
 export function seasonWageBill(state: GameState): number {
   return Object.entries(state.driverTeams)
     .filter(([, teamId]) => teamId === state.playerTeamId)
-    .reduce((sum, [driverId]) => {
-      const driver = DRIVER_BY_ID[driverId];
-      return sum + (driver?.contract.salaryPerSeason ?? 0);
-    }, 0);
+    .reduce((sum, [driverId]) => sum + salaryOf(state, driverId), 0);
 }
 
 /** Salary charged per round — the season bill spread over the calendar. */

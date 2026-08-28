@@ -4,9 +4,11 @@ import { prospectToDriver } from '@/game/driverDevelopment';
 import { GRID_2026_DRIVERS, gridTeamOf } from '@/data/grid2026';
 import { buildTracks } from '@/lib/careerGen';
 import { COMPONENT_CATALOG, transition } from '@/game/machine';
+import { gridDriverIds, squadOf } from '@/game/roster';
 import { clearSave, loadSave, readLocal, saveState, summarise } from '@/game/persistence';
 import type { SaveOrigin, SaveSummary } from '@/game/persistence';
 import type { GameEvent, GameState } from '@/game/types';
+import type { Driver } from '@/types';
 import { GameContext } from './gameContext';
 import type { GameContextValue, GameNotice } from './gameContext';
 
@@ -153,10 +155,29 @@ export function GameProvider({ children }: { children: ReactNode }) {
     [state],
   );
 
-  const playerDrivers = useMemo(
-    () => (state?.playerTeamId ? roster.filter((d) => d.teamId === state.playerTeamId) : []),
-    [roster, state],
-  );
+  /* The entry list. A squad may be four deep; two cars start the race,
+   * and everything from qualifying to the timing tower reads this. */
+  const gridRoster = useMemo(() => {
+    if (!state) return roster;
+    const entered = new Set(gridDriverIds(state));
+    return roster.filter((driver) => entered.has(driver.id));
+  }, [roster, state]);
+
+  /* Ordered by the line-up rather than by the data file, so "the first
+   * car" means the driver the player put first. */
+  const orderedSquad = useMemo(() => {
+    if (!state?.playerTeamId) return [];
+    const byId = new Map(roster.map((driver) => [driver.id, driver]));
+    return squadOf(state, state.playerTeamId)
+      .map((driverId) => byId.get(driverId))
+      .filter((driver): driver is Driver => Boolean(driver));
+  }, [roster, state]);
+
+  const playerDrivers = useMemo(() => {
+    if (!state?.playerTeamId) return [];
+    const entered = new Set(gridDriverIds(state));
+    return orderedSquad.filter((driver) => entered.has(driver.id));
+  }, [orderedSquad, state]);
 
   const value = useMemo<GameContextValue>(
     () => ({
@@ -171,15 +192,17 @@ export function GameProvider({ children }: { children: ReactNode }) {
       continueSave,
       playerTeam,
       playerDrivers,
+      playerSquad: orderedSquad,
       currentTrack,
       calendar,
       allTracks: TRACK_CATALOG,
       components: COMPONENT_CATALOG,
       roster,
+      gridRoster,
     }),
     [
       state, save, origin, booting, notice, dispatch, continueSave,
-      playerTeam, playerDrivers, currentTrack, calendar, roster,
+      playerTeam, playerDrivers, orderedSquad, currentTrack, calendar, roster, gridRoster,
     ],
   );
 

@@ -72,14 +72,30 @@ export function applyRaceResult(standings: Standings, result: RaceResult): Stand
   const teamById = new Map(constructors.map((row) => [row.teamId, row]));
 
   for (const finish of result.finishers) {
-    const driverRow = driverById.get(finish.driverId);
-    if (driverRow) {
-      driverRow.points += finish.points;
-      driverRow.teamId = finish.teamId;
-      if (finish.status === 'FINISHED') {
-        if (finish.position === 1) driverRow.wins += 1;
-        if (finish.position <= 3) driverRow.podiums += 1;
-      }
+    /* A driver the table has never seen still scored. Standings used to
+     * be built once, at the start of a season, so anybody who arrived
+     * after that — a mid-season signing, a reserve called up for one
+     * weekend — dropped their points on the floor: no row, nothing added,
+     * and the leaderboard quietly disagreed with the result sheet. */
+    let driverRow = driverById.get(finish.driverId);
+    if (!driverRow) {
+      driverRow = {
+        position: drivers.length + 1,
+        driverId: finish.driverId,
+        teamId: finish.teamId,
+        points: 0,
+        wins: 0,
+        podiums: 0,
+      };
+      drivers.push(driverRow);
+      driverById.set(finish.driverId, driverRow);
+    }
+
+    driverRow.points += finish.points;
+    driverRow.teamId = finish.teamId;
+    if (finish.status === 'FINISHED') {
+      if (finish.position === 1) driverRow.wins += 1;
+      if (finish.position <= 3) driverRow.podiums += 1;
     }
 
     const teamRow = teamById.get(finish.teamId);

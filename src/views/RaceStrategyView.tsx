@@ -21,7 +21,7 @@ import { TelemetryChart } from '@/components/ui/TelemetryChart';
 import { TyreBadge } from '@/components/ui/TyreBadge';
 import { GameButton } from '@/components/game/GameButton';
 import { scaledLaps } from '@/game/trackAdapter';
-import { DAMP_THRESHOLD, conditionLabel, rollRaceWeather } from '@/game/weather';
+import { DAMP_THRESHOLD, bestCompoundFor, conditionLabel, rollRaceWeather } from '@/game/weather';
 import { TYRE_MODEL } from '@/engine/raceEngine';
 import { TYRE_COLOR, cx, flagEmoji } from '@/lib/format';
 import { useGame } from '@/state/gameContext';
@@ -94,9 +94,13 @@ function GridSignOff() {
     ? rollRaceWeather(currentTrack, state.season, state.round, raceLaps)
     : null;
   const startsWet = (weather?.startWetness ?? 0) >= DAMP_THRESHOLD;
-  /* Wets are only a starting choice if the race actually starts wet —
-   * offering them on a dry Sunday is a trap, not a decision. */
-  const compounds = startsWet ? WET_COMPOUNDS : DRY_COMPOUNDS;
+  /* Every compound is a starting choice. Hiding the wets on a dry
+   * Saturday, and the slicks on a wet one, took the gamble out of the
+   * player's hands entirely: starting on inters under a threatening sky,
+   * or on slicks on a track that is about to dry, is exactly the call a
+   * strategist makes. The recommendation is a hint, not a gate. */
+  const compounds: TyreCompound[] = [...DRY_COMPOUNDS, ...WET_COMPOUNDS];
+  const recommended = bestCompoundFor(weather?.startWetness ?? 0);
 
   return (
     <Panel
@@ -156,7 +160,7 @@ function GridSignOff() {
         {!gating
           ? 'The starting compound is confirmed here after qualifying, before the grid forms.'
           : startsWet
-            ? `It is ${conditionLabel(weather?.startWetness ?? 0).toLowerCase()} out there. ${raceLaps} laps on a wet track — intermediates if it is drying, full wets if it is not.`
+            ? `It is ${conditionLabel(weather?.startWetness ?? 0).toLowerCase()} out there. ${raceLaps} laps on a wet track — intermediates if it is drying, full wets if it is not. Whichever you pick is the one that gets fitted.`
             : `Choose the compound each car starts on. ${raceLaps} laps to run — a soft start buys track position early and costs you a longer second stint.${
                 (weather?.rainChancePct ?? 0) >= 45
                   ? ' Watch the sky: this one could turn.'
@@ -221,6 +225,12 @@ function GridSignOff() {
                     )} laps before the cliff`
                   : 'No compound chosen'}
               </p>
+              {confirmed && plan && plan.startingCompound !== recommended && (
+                <p className="mt-1 text-[10px] text-neon-amber">
+                  The conditions call for {recommended.toLowerCase()}. Yours is a gamble —
+                  it will be fitted as chosen.
+                </p>
+              )}
             </div>
           );
         })}

@@ -23,9 +23,8 @@ import type {
 /* ----------------------------- tuning ------------------------------- */
 
 import {
-  DAMP_THRESHOLD,
-  bestCompoundFor,
   compoundPaceFactor,
+  compoundToFit,
   compoundRiskFactor,
   compoundWearFactor,
   dryWeather,
@@ -230,6 +229,19 @@ interface CarInternal {
   aggression: number;
   plannedPitLaps: number[];
   nextCompound: TyreCompound;
+  /**
+   * True once the compound was named by whoever is running this car —
+   * the pit wall mid-race, or a strategy signed off in the wet. An
+   * explicit call is honoured exactly, including the one wet compound
+   * over the other; anything else is reconciled with the conditions.
+   * Cleared when the set goes on, so the next automatic stop is free to
+   * read the track again.
+   */
+  compoundIsExplicit: boolean;
+  /** Which garage this car belongs to — one crew, one box. */
+  teamId: string;
+  /** Race time this car has spent stacked behind its own team-mate. */
+  pitQueueMs: number;
   pushMs: number;
   pushCooldownMs: number;
   /**
@@ -473,6 +485,11 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
 
   const internals = new Map<string, CarInternal>();
 
+  /* When each team's box is free again, on the session clock. One crew
+   * per team means two cars cannot be worked on at once: the second one
+   * waits in the lane behind the first, which is the double stack. */
+  const boxFreeAtMs = new Map<string, number>();
+
   const pendingEvents: OvertakeEvent[] = [];
   /** Keyed by the unordered pair, to suppress A/B ping-pong. */
   const pairCooldown = new Map<string, number>();
@@ -580,12 +597,17 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
      * strategy room is honoured on a dry track and quietly overruled on a
      * wet one — no team starts a wet race on slicks, and a player who
      * picked mediums on Saturday should not be punished for weather that
-     * arrived on Sunday. */
+     * arrived on Sunday.
+     *
+     * A wet compound, though, was picked *because* of the forecast, so it
+     * is a decision and it stands: a team starting on inters under a sky
+     * that says full wets is gambling on the track drying, and that
+     * gamble is theirs to take. */
+    const planned = options.startingTyres?.[driver.id];
     const chosen: TyreCompound =
-      options.startingTyres?.[driver.id] ??
-      (index % 3 === 0 && index < 6 ? 'SOFT' : 'MEDIUM');
-    const compound: TyreCompound =
-      wetness >= DAMP_THRESHOLD ? bestCompoundFor(wetness, chosen) : chosen;
+      planned ?? (index % 3 === 0 && index < 6 ? 'SOFT' : 'MEDIUM');
+    const wetChoice = planned != null && isWetCompound(planned);
+    const compound: TyreCompound = compoundToFit(wetness, chosen, wetChoice);
 
     // 50 reliability is the neutral car; 99 roughly halves the rate of
     // consumption, 20 roughly doubles it.
@@ -631,6 +653,10 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
             : rng() > 0.45
               ? 'HARD'
               : 'MEDIUM',
+      // Nobody has called for anything yet; the conditions decide.
+      compoundIsExplicit: false,
+      teamId: driver.teamId,
+      pitQueueMs: 0,
       pushMs: 0,
       pushCooldownMs: 0,
       pushLatched: false,
@@ -712,6 +738,8 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
         wearPct: fromGrid ? 0 : 22 + rng() * 26,
         temperatureC: fromGrid ? 88 + rng() * 6 : 92 + rng() * 12,
       },
+      nextCompound: internals.get(driver.id)!.nextCompound,
+      pitRequested: false,
       fuelKg: Math.max(12, 110 - startLap * FUEL_BURN_PER_LAP + rng() * 3),
       status: 'LAPPING' as DriverStatus,
       pitStops: startLap > 12 ? 1 : 0,
@@ -923,13 +951,22 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
   }
 
   function beginPitStop(car: CarState, internal: CarInternal) {
-    /* Whatever the plan said, the crew fits what the track needs. Nobody
-     * bolts on slicks in a downpour because it was written down before
-     * the race — and the reverse matters just as much, since a car that
-     * stays on wets after a track dries has thrown the race away. */
-    /* On a dry track this returns their own planned compound untouched,
-     * so a deliberate soft-versus-hard call still stands. */
-    internal.nextCompound = bestCompoundFor(wetness, internal.nextCompound);
+    /* A plan nobody has looked at since Saturday is reconciled with the
+     * track: nobody bolts on slicks in a downpour because it was written
+     * down before the race, and a car that stays on wets after the track
+     * dries has thrown the race away.
+     *
+     * A compound the pit wall actually called for is a different thing
+     * and is fitted exactly as asked — including inters in a downpour or
+     * full wets on a drying track, which is a real strategic gamble and
+     * used to be silently swapped for the other one. */
+    internal.nextCompound = compoundToFit(
+      wetness,
+      internal.nextCompound,
+      internal.compoundIsExplicit,
+    );
+    car.nextCompound = internal.nextCompound;
+    car.pitRequested = false;
 
     car.status = 'PIT_ENTRY';
     car.pitProgress = 0;
@@ -943,13 +980,28 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
     const fumbled = rng() < (1 - internal.crewQuality) * 0.14;
     internal.pitStationaryMs = clean + (fumbled ? PIT_FUMBLE_MS * (0.5 + rng() * 0.8) : 0);
 
+    /* One crew, one box. If the team-mate is still on the jacks when this
+     * car arrives it waits behind them rather than being served at the
+     * same time — which is what used to happen, and what made calling
+     * both cars in together on different compounds free. */
+    const arrivesAtMs = state.elapsedMs + PIT_APPROACH_MS;
+    const boxFreeAt = boxFreeAtMs.get(internal.teamId) ?? 0;
+    internal.pitQueueMs = Math.max(0, boxFreeAt - arrivesAtMs);
+    boxFreeAtMs.set(
+      internal.teamId,
+      arrivesAtMs + internal.pitQueueMs + internal.pitStationaryMs,
+    );
+
     pushIncident(state, {
       id: `inc-${eventSeq++}`,
       lap: car.lap,
       atMs: state.elapsedMs,
       kind: 'PIT_STOP',
       driverId: car.driverId,
-      message: `${car.driverId} boxes for ${internal.nextCompound.toLowerCase()} tyres`,
+      message:
+        internal.pitQueueMs > 0
+          ? `${car.driverId} boxes for ${internal.nextCompound.toLowerCase()} tyres — stacked behind the team-mate`
+          : `${car.driverId} boxes for ${internal.nextCompound.toLowerCase()} tyres`,
     });
   }
 
@@ -973,11 +1025,20 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       message: `Stationary ${(internal.pitStationaryMs / 1000).toFixed(1)}s — ${car.tyre.compound.toLowerCase()} fitted`,
     });
 
-    /* The dry rotation only applies to dry tyres; a wet stop leaves the
-     * next choice to the conditions at the time. */
-    if (!isWetCompound(internal.nextCompound)) {
+    /* The rotation is the AI working its own way down the compounds. A
+     * car the pit wall runs keeps whatever was last queued for it, or the
+     * selector on the pit wall would say one thing while the crew held
+     * another — which is how two cars boxing together ended up on each
+     * other's tyres. */
+    if (!manualPit.has(car.driverId) && !isWetCompound(internal.nextCompound)) {
       internal.nextCompound = internal.nextCompound === 'SOFT' ? 'MEDIUM' : 'HARD';
     }
+    /* The call has been served. A later stop with no fresh call is free
+     * to read the track again, so a race that dries out does not keep
+     * re-fitting the tyre that was right an hour ago. */
+    internal.compoundIsExplicit = false;
+    internal.pitQueueMs = 0;
+    car.nextCompound = internal.nextCompound;
   }
 
   /** The car crosses the pit exit line and rejoins the circuit. */
@@ -1211,7 +1272,11 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       ) {
         internal.pitTimerMs += dt;
         const elapsed = internal.pitTimerMs;
-        const stationaryEnd = PIT_APPROACH_MS + internal.pitStationaryMs;
+        /* Queueing behind a stacked team-mate happens before the wheel
+         * guns touch the car, so it lands between the approach and the
+         * stop itself. */
+        const workStart = PIT_APPROACH_MS + internal.pitQueueMs;
+        const stationaryEnd = workStart + internal.pitStationaryMs;
         const totalMs = stationaryEnd + PIT_EXIT_MS;
 
         let lanePosition: number;
@@ -1221,8 +1286,11 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
           lanePosition = PIT_BOX_POSITION * (1 - Math.pow(1 - t, 1.7));
           car.status = 'PIT_ENTRY';
         } else if (elapsed < stationaryEnd) {
-          // Stopped. Nothing moves, which is exactly the point.
-          lanePosition = PIT_BOX_POSITION;
+          /* Stopped. Nothing moves, which is exactly the point. A stacked
+           * car sits a car's length short of its own box until the crew
+           * is free, so the map shows the queue rather than two cars on
+           * the same jacks. */
+          lanePosition = elapsed < workStart ? PIT_BOX_POSITION - 0.05 : PIT_BOX_POSITION;
           if (car.status !== 'IN_PIT') car.status = 'IN_PIT';
         } else {
           const t = clamp((elapsed - stationaryEnd) / PIT_EXIT_MS, 0, 1);
@@ -1441,6 +1509,12 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
           internal.plannedPitLaps.includes(car.lap) ||
           car.tyre.wearPct > wearTrigger ||
           car.fuelKg < 3;
+      /* Keep the readouts on the car itself honest: the queued compound
+       * and whether a stop is pending are both things the pit wall has to
+       * be able to see without guessing. */
+      car.nextCompound = internal.nextCompound;
+      car.pitRequested = wantsPit || internal.plannedPitLaps.length > 0;
+
       if (
         wantsPit &&
         car.status === 'LAPPING' &&
@@ -1674,12 +1748,21 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
         const internal = internals.get(cmd.driverId);
         if (car && internal && car.status === 'LAPPING') {
           internal.plannedPitLaps = [car.lap, ...internal.plannedPitLaps];
+          car.pitRequested = true;
         }
         break;
       }
       case 'SET_TYRE': {
         const internal = internals.get(cmd.driverId);
-        if (internal) internal.nextCompound = cmd.compound;
+        if (!internal) break;
+        internal.nextCompound = cmd.compound;
+        /* Named by the pit wall, so it is fitted as asked rather than
+         * reconciled with the track. This is what lets a strategist run
+         * inters in a downpour, or wets on a track that is coming back
+         * to them — the call either wins them the race or costs them it. */
+        internal.compoundIsExplicit = true;
+        const car = state.cars.find((c) => c.driverId === cmd.driverId);
+        if (car) car.nextCompound = cmd.compound;
         break;
       }
       case 'PUSH_MODE': {
@@ -1771,6 +1854,7 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
         // Only a stop that has not been committed to can be waved off.
         if (car.status === 'PIT_ENTRY' || car.status === 'IN_PIT') break;
         internal.plannedPitLaps = internal.plannedPitLaps.filter((l) => l > car.lap + 1);
+        car.pitRequested = internal.plannedPitLaps.length > 0;
         pushIncident(state, {
           id: `inc-${eventSeq++}`,
           lap: car.lap + 1,

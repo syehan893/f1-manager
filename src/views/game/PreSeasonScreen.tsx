@@ -32,8 +32,11 @@ const WINTER_PARTS: PartCategory[] = [
 
 /** Phase: PRE_SEASON — R&D and transfers before lights out on round 1. */
 export function PreSeasonScreen() {
-  const { state, dispatch, playerTeam, playerDrivers, roster } = useGame();
-  const [transferTarget, setTransferTarget] = useState<string | null>(null);
+  const { state, dispatch, playerTeam, playerSquad, roster } = useGame();
+  /* Keyed by the driver being swapped out. One shared value meant
+   * picking a replacement for the first car put the same name in the
+   * second car's selector too. */
+  const [transferTarget, setTransferTarget] = useState<Record<string, string>>({});
 
   if (!state || !playerTeam) return null;
 
@@ -172,12 +175,13 @@ export function PreSeasonScreen() {
         {/* Transfers */}
         <Panel title="Driver Line-up" icon={<ArrowRightLeft className="size-3.5" />}>
           <p className="mb-3 text-[11px] text-chrome-500">
-            Swap one of your drivers for anyone on the grid. It is a straight exchange — the
-            other team takes your driver in return.
+            Swap one of your drivers for anyone on the grid — a straight exchange, the other
+            team takes yours in return. To sign somebody without giving anybody up, or to move
+            a reserve into the car, use the Driver Market screen.
           </p>
 
           <div className="grid gap-2.5">
-            {playerDrivers.map((driver) => (
+            {playerSquad.map((driver) => (
               <div
                 key={driver.id}
                 className="rounded-lg border border-carbon-600/70 bg-carbon-900/40 p-3"
@@ -206,8 +210,13 @@ export function PreSeasonScreen() {
 
                 <div className="mt-2.5 flex flex-wrap items-center gap-2">
                   <select
-                    value={transferTarget ?? ''}
-                    onChange={(event) => setTransferTarget(event.target.value || null)}
+                    value={transferTarget[driver.id] ?? ''}
+                    onChange={(event) =>
+                      setTransferTarget((current) => ({
+                        ...current,
+                        [driver.id]: event.target.value,
+                      }))
+                    }
                     aria-label={`Replacement for ${driver.lastName}`}
                     className="min-w-0 flex-1 rounded-md border border-carbon-600 bg-carbon-900/80 px-2 py-1.5 text-[11px] text-chrome-200 focus:border-neon-cyan/50 focus:outline-none"
                   >
@@ -223,15 +232,18 @@ export function PreSeasonScreen() {
                   <GameButton
                     size="sm"
                     variant="secondary"
-                    disabled={!transferTarget}
+                    disabled={!transferTarget[driver.id]}
                     onClick={() => {
-                      if (!transferTarget) return;
+                      const incoming = transferTarget[driver.id];
+                      if (!incoming) return;
                       const ok = dispatch({
                         type: 'SWAP_DRIVER',
-                        incomingDriverId: transferTarget,
+                        incomingDriverId: incoming,
                         outgoingDriverId: driver.id,
                       });
-                      if (ok) setTransferTarget(null);
+                      if (ok) {
+                        setTransferTarget((current) => ({ ...current, [driver.id]: '' }));
+                      }
                     }}
                     icon={<ArrowRightLeft className="size-3" />}
                   >

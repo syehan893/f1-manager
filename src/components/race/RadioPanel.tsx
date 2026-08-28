@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   AlertTriangle,
@@ -418,32 +418,36 @@ export function RadioPanel({ className }: { className?: string }) {
    * actually looking at when it decides what to bolt on. */
   const wetness = snapshot.weather.wetness;
   const trackIsWet = wetness >= DAMP_THRESHOLD;
+  /* Rain in the forecast is enough to put the wets on the console: by the
+   * time the track is already wet, the stop that should have been called
+   * a lap ago has been lost. */
+  const showWets = trackIsWet || snapshot.weather.rainChancePct >= 20;
 
   /** Calls the pit wall made, kept separate from what the drivers said. */
   const [pitCalls, setPitCalls] = useState<PitCallEntry[]>([]);
-  const [seq, setSeq] = useState(0);
-  /** Compound queued for each car's next stop. */
-  const [nextTyre, setNextTyre] = useState<Record<string, TyreCompound>>({});
+  const seq = useRef(0);
 
   const teamOfCar = useTeamOf();
   const codeOf = (driverId: string) =>
     playerDrivers.find((driver) => driver.id === driverId)?.code ?? driverId.slice(0, 3);
 
   const logCall = (driverCode: string, text: string) => {
-    setSeq((n) => n + 1);
-    setPitCalls((current) => [{ id: seq + 1, driverCode, text }, ...current].slice(0, 6));
+    /* A ref rather than state: two cars can be called in the same click
+     * handler, and a batched setState would hand both entries the same
+     * id. */
+    seq.current += 1;
+    setPitCalls((current) => [{ id: seq.current, driverCode, text }, ...current].slice(0, 6));
   };
 
   const chooseTyre = (car: CarState, code: string, compound: TyreCompound) => {
-    // Re-picking the compound already queued is not a call worth logging;
-    // without this the log fills with the same line every time the player
-    // taps around the selector.
-    const current = nextTyre[car.driverId] ?? car.tyre.compound;
-    if (current === compound) return;
-
-    setNextTyre((prev) => ({ ...prev, [car.driverId]: compound }));
+    /* The command always goes to the engine, even when the selector
+     * already shows this compound. The queue is the engine's, not this
+     * panel's, and re-asserting it is how the pit wall stays the
+     * authority — only the log line is suppressed, so tapping around the
+     * selector does not fill it with the same call. */
+    const alreadyQueued = car.nextCompound === compound;
     send({ type: 'SET_TYRE', driverId: car.driverId, compound });
-    logCall(code, `${compound.toLowerCase()} tyres readied`);
+    if (!alreadyQueued) logCall(code, `${compound.toLowerCase()} tyres readied`);
   };
 
   return (
@@ -518,7 +522,9 @@ export function RadioPanel({ className }: { className?: string }) {
             car.status === 'IN_PIT' ||
             car.status === 'PIT_ENTRY' ||
             car.status === 'PIT_EXIT';
-          const queued = nextTyre[car.driverId] ?? car.tyre.compound;
+          /* Straight from the car: what the crew is actually holding,
+           * not a copy this panel keeps and lets go stale. */
+          const queued = car.nextCompound;
           const isFocused = focusedDriverId === car.driverId;
 
           // Both modes refuse to arm when the resource behind them is gone.
@@ -585,11 +591,13 @@ export function RadioPanel({ className }: { className?: string }) {
                   </span>
                 </div>
 
-                {/* Wets appear once the track is actually wet: three slicks
-                    in a downpour is a broken pit wall, and five buttons on
-                    a dry Sunday is clutter. */}
-                <div className={cx('grid gap-1.5', trackIsWet ? 'grid-cols-5' : 'grid-cols-3')}>
-                  {(trackIsWet
+                {/* Wets appear as soon as there is rain about rather than
+                    only once the track is soaked — calling for them a lap
+                    early is the whole point — and both wet compounds are
+                    always offered separately, because inters versus full
+                    wets is the call, not a detail the game should make. */}
+                <div className={cx('grid gap-1.5', showWets ? 'grid-cols-5' : 'grid-cols-3')}>
+                  {(showWets
                     ? [...DRY_COMPOUNDS, ...WET_COMPOUNDS]
                     : DRY_COMPOUNDS
                   ).map((compound) => {

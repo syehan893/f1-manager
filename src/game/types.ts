@@ -1,3 +1,5 @@
+import type { MailMessage } from './mail';
+import type { SocialPost } from './social';
 import type { CarStats } from '@/data/grid2026';
 import type { SponsorTier } from '@/data/sponsors';
 import type { StaffRole } from '@/data/staff';
@@ -375,6 +377,102 @@ export interface SeasonRecord {
   managerScore: number;
 }
 
+/* ------------------------- contracts and talks ------------------------- */
+
+/** What a driver is signed to do: race, or wait. */
+export type DriverRole = 'RACE' | 'RESERVE';
+
+/**
+ * A signed driver contract.
+ *
+ * The 2026 data file gives every driver a contract, but it is a fixed
+ * description of them rather than a deal with a team: it never changed,
+ * never ran out, and nobody ever negotiated it. This is the live one,
+ * written when a driver actually signs and wound down a year at a time
+ * like every other contract in the save.
+ */
+export interface DriverDeal {
+  driverId: string;
+  teamId: string;
+  /** Per season, as agreed — not what the data file says they are worth. */
+  salary: number;
+  seasonsRemaining: number;
+  signedInSeason: number;
+  signingBonus: number;
+  /** What a rival must pay to take them off this contract early. */
+  buyoutClause: number;
+  role: DriverRole;
+}
+
+/** Terms put to a driver. Everything the player can actually move. */
+export interface ContractOffer {
+  salary: number;
+  seasons: number;
+  signingBonus: number;
+  /** Paid to the team that holds them; zero for a free agent. */
+  transferFee: number;
+  role: DriverRole;
+}
+
+export type NegotiationStage =
+  /** Contact made; the driver has said what it would take. */
+  | 'TALKING'
+  /** Terms are on the table and being considered. */
+  | 'CONSIDERING'
+  | 'AGREED'
+  | 'REJECTED'
+  | 'WITHDRAWN';
+
+/**
+ * One live conversation with a driver about a move. Approaching somebody
+ * is not the same as signing them: they name a price, their team names
+ * another, and both have to be met before anybody signs anything.
+ */
+export interface DriverNegotiation {
+  id: string;
+  driverId: string;
+  /** The team trying to sign them. */
+  teamId: string;
+  /** Who holds their contract now; empty for a free agent. */
+  fromTeamId: string;
+  season: number;
+  round: number;
+  stage: NegotiationStage;
+  /** 0-100. How much they want the move, before terms are discussed. */
+  interest: number;
+  /** What the driver is asking for. */
+  asking: ContractOffer;
+  /** The standing offer, once one has been made. */
+  offer: ContractOffer | null;
+  /** Offers already turned down. Patience runs out. */
+  rejections: number;
+  /** The last thing said, in their own words. */
+  note: string;
+}
+
+/** A driver the player has told the paddock they will listen to bids for. */
+export interface TransferListing {
+  driverId: string;
+  askingFee: number;
+  listedInSeason: number;
+  listedInRound: number;
+}
+
+/** A rival team's bid for one of the player's drivers. */
+export interface TransferOffer {
+  id: string;
+  driverId: string;
+  /** The team bidding. */
+  fromTeamId: string;
+  fee: number;
+  /** Salary the buying team takes off the books. */
+  salaryRelieved: number;
+  season: number;
+  round: number;
+  status: 'OPEN' | 'ACCEPTED' | 'DECLINED' | 'EXPIRED';
+  note: string;
+}
+
 /* ------------------------------ silly season --------------------------- */
 
 export interface TransferMove {
@@ -476,7 +574,7 @@ export interface RoundRecord {
   pointsScored: number;
 }
 
-export const SAVE_VERSION = 12;
+export const SAVE_VERSION = 13;
 
 export interface GameState {
   /** Bumped when the shape changes; older saves are discarded on load. */
@@ -503,8 +601,27 @@ export interface GameState {
 
   calendarTrackIds: string[];
   teams: TeamSeasonState[];
-  /** driverId -> teamId. Mutable, so transfers are reflected everywhere. */
+  /**
+   * driverId -> teamId. Mutable, so transfers are reflected everywhere.
+   * This is squad membership and nothing more: a team may hold three or
+   * four drivers here. Which two of them race is `lineups`.
+   */
   driverTeams: Record<string, string>;
+  /**
+   * teamId -> driver ids in running order. The first two are the cars
+   * that take the grid; everybody after them is a reserve, on the books
+   * and paid but not entered. A team with no entry here falls back to
+   * the order `driverTeams` yields, so nothing depends on it existing.
+   */
+  lineups: Record<string, string[]>;
+  /** Live driver contracts, keyed by driver. */
+  deals: Record<string, DriverDeal>;
+  /** Contract talks the player has open right now. */
+  negotiations: DriverNegotiation[];
+  /** Drivers the player has told the paddock they will listen to bids for. */
+  transferList: TransferListing[];
+  /** Bids rivals have made for the player's drivers, newest first. */
+  transferOffers: TransferOffer[];
 
   qualifying: QualifyingResult | null;
   lastRace: RaceResult | null;
@@ -538,6 +655,10 @@ export interface GameState {
    * that no longer names anybody, and they vanish from the grid at the
    * next new year. */
   academyDrivers: ProspectDriver[];
+  /** Everything the paddock has said to the manager, newest first. */
+  mail: MailMessage[];
+  /** What the paddock is saying out loud, newest first. */
+  social: SocialPost[];
   /** Completed championships, newest last. */
   seasonArchive: SeasonRecord[];
   /**
@@ -570,6 +691,24 @@ export type GameEvent =
   | { type: 'SET_STRATEGY'; plan: StrategyPlan }
   | { type: 'SET_CALENDAR'; trackIds: string[] }
   | { type: 'SWAP_DRIVER'; incomingDriverId: string; outgoingDriverId: string }
+  /* ---- squads and the entry list ---- */
+  | { type: 'SET_LINEUP'; order: string[] }
+  | { type: 'PROMOTE_DRIVER'; driverId: string }
+  | { type: 'DEMOTE_DRIVER'; driverId: string }
+  | { type: 'RELEASE_DRIVER'; driverId: string }
+  /* ---- talks ---- */
+  | { type: 'APPROACH_DRIVER'; driverId: string }
+  | { type: 'WITHDRAW_APPROACH'; negotiationId: string }
+  | { type: 'OFFER_CONTRACT'; negotiationId: string; offer: ContractOffer }
+  | { type: 'RENEW_CONTRACT'; driverId: string; salary: number; seasons: number }
+  /* ---- offering a driver out ---- */
+  | { type: 'LIST_DRIVER'; driverId: string; askingFee: number }
+  | { type: 'UNLIST_DRIVER'; driverId: string }
+  | { type: 'RESPOND_TO_BID'; offerId: string; accept: boolean }
+  /* ---- the inbox ---- */
+  | { type: 'READ_MAIL'; mailId: string }
+  | { type: 'READ_ALL_MAIL' }
+  | { type: 'DELETE_MAIL'; mailId: string }
   | { type: 'START_SEASON' }
   | { type: 'APPLY_FOR_JOB'; teamId: string; role: JobRole }
   | { type: 'PROCEED_TO_QUALIFYING' }
@@ -581,7 +720,9 @@ export type GameEvent =
   | { type: 'SIGN_SPONSOR'; sponsorId: string }
   | { type: 'HIRE_STAFF'; candidateId: string }
   | { type: 'RELEASE_STAFF'; role: StaffRole }
-  | { type: 'SIGN_PROSPECT'; prospectId: string; outgoingDriverId: string }
+  /* `outgoingDriverId` is optional now: a junior joins the squad, and
+   * only displaces somebody when the caller explicitly says to. */
+  | { type: 'SIGN_PROSPECT'; prospectId: string; outgoingDriverId?: string }
   | { type: 'CONFIRM_SPONSORS' }
   | { type: 'COUNTDOWN_COMPLETE' }
   | { type: 'RACE_COMPLETE'; result: RaceResult }

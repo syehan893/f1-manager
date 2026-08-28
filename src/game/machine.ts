@@ -25,6 +25,41 @@ import {
 } from './partDevelopment';
 import { applyTransferMoves, runSillySeason } from './transferMarket';
 import {
+  GRID_SEATS_PER_TEAM,
+  MAX_SQUAD_SIZE,
+  demoteToReserve,
+  joinSquad,
+  leaveSquad,
+  openSeatsAt,
+  promoteToRaceSeat,
+  raceDriversOf,
+  setLineup,
+  squadHasRoom,
+  squadOf,
+} from './roster';
+import {
+  MAX_CONTRACT_SEASONS,
+  askingTerms,
+  dealFor,
+  dealFromOffer,
+  judgeOffer,
+  openNegotiation,
+  releaseCost,
+  rivalBids,
+  signingCost,
+} from './contracts';
+import { postMail } from './mail';
+import {
+  announceContract,
+  announceQualifying,
+  announceRace,
+  announceSillySeason,
+  announceTransfer,
+  championshipPosts,
+  driverMoodPosts,
+  rumourPosts,
+} from './paddockFeed';
+import {
   advanceDriverSeason,
   buildProspects,
   seedDriverRecords,
@@ -51,6 +86,7 @@ import {
   staffBuildTimeReduction,
 } from './staffing';
 import { applyRaceResult, emptyStandings } from './championship';
+import { gridTeamOf } from '@/data/grid2026';
 import { DRIVER_BY_ID } from '@/data/drivers';
 import {
   DEFAULT_FACILITIES,
@@ -83,6 +119,7 @@ import {
 import { SAVE_VERSION } from './types';
 import type { ComponentVariant } from '@/types/career';
 import type {
+  DriverRole,
   GameEvent,
   GameEventType,
   GamePhase,
@@ -177,7 +214,24 @@ const MANAGEMENT_ACTIONS: GameEventType[] = [
   'SET_STARTING_TYRE',
   'CONDITION_EVENT',
   'SET_SETTINGS',
+  /* The squad, and the market it is built from. Running the team is
+   * something the player does between sessions, so all of it lives
+   * wherever the sidebar is reachable. */
+  'SET_LINEUP',
+  'PROMOTE_DRIVER',
+  'DEMOTE_DRIVER',
+  'RELEASE_DRIVER',
+  'APPROACH_DRIVER',
+  'WITHDRAW_APPROACH',
+  'OFFER_CONTRACT',
+  'RENEW_CONTRACT',
+  'LIST_DRIVER',
+  'UNLIST_DRIVER',
+  'RESPOND_TO_BID',
 ];
+
+/** Reading the post is legal absolutely everywhere, including mid-race. */
+const MAIL_ACTIONS: GameEventType[] = ['READ_MAIL', 'READ_ALL_MAIL', 'DELETE_MAIL'];
 
 /** Events that mutate state but leave the phase alone. */
 export const PHASE_ACTIONS: Record<GamePhase, GameEventType[]> = {
@@ -185,17 +239,17 @@ export const PHASE_ACTIONS: Record<GamePhase, GameEventType[]> = {
   SETUP_CAREER: ['SET_SETTINGS', 'SET_MANAGER_NAME'],
   TEAM_SELECTION: ['PREVIEW_TEAM'],
   // The calendar is only editable before the championship starts.
-  PRE_SEASON: [...MANAGEMENT_ACTIONS, 'SET_CALENDAR', 'SIGN_SPONSOR'],
-  HUB: [...MANAGEMENT_ACTIONS, 'APPLY_FOR_JOB', 'SIGN_SPONSOR'],
-  QUALIFYING: [...MANAGEMENT_ACTIONS, 'QUALIFYING_COMPLETE'],
-  RACE_STRATEGY: MANAGEMENT_ACTIONS,
+  PRE_SEASON: [...MANAGEMENT_ACTIONS, ...MAIL_ACTIONS, 'SET_CALENDAR', 'SIGN_SPONSOR'],
+  HUB: [...MANAGEMENT_ACTIONS, ...MAIL_ACTIONS, 'APPLY_FOR_JOB', 'SIGN_SPONSOR'],
+  QUALIFYING: [...MANAGEMENT_ACTIONS, ...MAIL_ACTIONS, 'QUALIFYING_COMPLETE'],
+  RACE_STRATEGY: [...MANAGEMENT_ACTIONS, ...MAIL_ACTIONS],
   RACE_COUNTDOWN: [],
   // Condition moves during the race, so this one event is legal in-session.
-  RACE_SESSION: ['CONDITION_EVENT'],
-  POST_RACE: MANAGEMENT_ACTIONS,
+  RACE_SESSION: ['CONDITION_EVENT', ...MAIL_ACTIONS],
+  POST_RACE: [...MANAGEMENT_ACTIONS, ...MAIL_ACTIONS],
   // Signing is the whole point of the screen; management stays open so
   // the player can look at the car and the books while they decide.
-  SEASON_REVIEW: [...MANAGEMENT_ACTIONS, 'SIGN_SPONSOR'],
+  SEASON_REVIEW: [...MANAGEMENT_ACTIONS, ...MAIL_ACTIONS, 'SIGN_SPONSOR'],
 };
 
 export const DEFAULT_SETTINGS: SeasonSettings = {
@@ -300,6 +354,18 @@ export function createNewGame(managerName = 'New Manager'): GameState {
       .map((track) => track.id),
     teams,
     driverTeams,
+    /* Every team starts on two cars, in the order the data file lists
+     * them. The bench is something the player builds. */
+    lineups: GRID_2026_TEAMS.reduce<Record<string, string[]>>((map, team) => {
+      map[team.id] = GRID_2026_DRIVERS.filter((driver) => driver.teamId === team.id).map(
+        (driver) => driver.id,
+      );
+      return map;
+    }, {}),
+    deals: {},
+    negotiations: [],
+    transferList: [],
+    transferOffers: [],
     qualifying: null,
     lastRace: null,
     standings: emptyStandings(
@@ -345,6 +411,8 @@ export function createNewGame(managerName = 'New Manager'): GameState {
     ),
     prospects: buildProspects(2026),
     academyDrivers: [],
+    mail: [],
+    social: [],
     seasonArchive: [],
     pendingGridPenalty: 0,
   };
@@ -443,11 +511,20 @@ export const AREA_LABEL: Record<RndArea, string> = {
   cooling: 'Cooling',
 };
 
-/** The player's two race drivers, in roster order. */
+/**
+ * The player's two race drivers, in line-up order.
+ *
+ * This is the entry list rather than the squad: strategy is set for the
+ * cars that start the race, and only two of them do however many drivers
+ * the team has under contract.
+ */
 export function playerDriverIds(state: GameState): string[] {
-  return Object.entries(state.driverTeams)
-    .filter(([, teamId]) => teamId === state.playerTeamId)
-    .map(([driverId]) => driverId);
+  return raceDriversOf(state, state.playerTeamId);
+}
+
+/** Everyone the player has under contract, reserves included. */
+export function playerSquadIds(state: GameState): string[] {
+  return squadOf(state, state.playerTeamId);
 }
 
 /**
@@ -496,6 +573,21 @@ function clone(state: GameState): GameState {
       development: team.development.map((project) => ({ ...project })),
     })),
     driverTeams: { ...state.driverTeams },
+    lineups: Object.fromEntries(
+      Object.entries(state.lineups ?? {}).map(([teamId, order]) => [teamId, [...order]]),
+    ),
+    deals: Object.fromEntries(
+      Object.entries(state.deals ?? {}).map(([key, deal]) => [key, { ...deal }]),
+    ),
+    negotiations: (state.negotiations ?? []).map((entry) => ({
+      ...entry,
+      asking: { ...entry.asking },
+      offer: entry.offer ? { ...entry.offer } : null,
+    })),
+    transferList: (state.transferList ?? []).map((entry) => ({ ...entry })),
+    transferOffers: (state.transferOffers ?? []).map((entry) => ({ ...entry })),
+    mail: (state.mail ?? []).map((entry) => ({ ...entry })),
+    social: (state.social ?? []).map((entry) => ({ ...entry })),
     calendarTrackIds: [...state.calendarTrackIds],
     standings: {
       drivers: state.standings.drivers.map((row) => ({ ...row })),
@@ -783,15 +875,509 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         );
       }
 
-      // A straight swap keeps both teams on two cars.
-      next.driverTeams[incomingDriverId] = next.playerTeamId!;
-      next.driverTeams[outgoingDriverId] = incomingTeam;
+      /* A straight swap keeps both squads the size they were. The
+       * incoming driver takes the outgoing one's place in the running
+       * order rather than being appended, so swapping a race driver
+       * gives you a race driver and swapping a reserve does not
+       * accidentally promote anybody. */
+      const ourOrder = squadOf(next, next.playerTeamId).map((driverId) =>
+        driverId === outgoingDriverId ? incomingDriverId : driverId,
+      );
+      leaveSquad(next, outgoingDriverId);
+      joinSquad(next, incomingDriverId, next.playerTeamId!);
+      setLineup(next, next.playerTeamId!, ourOrder);
+
+      const theirOrder = squadOf(next, incomingTeam).map((driverId) =>
+        driverId === incomingDriverId ? outgoingDriverId : driverId,
+      );
+      joinSquad(next, outgoingDriverId, incomingTeam);
+      setLineup(next, incomingTeam, theirOrder);
+
+      /* Both drivers keep a contract on their new books, so the wage
+       * bill and the next negotiation both know what they are on. */
+      const incomingDeal = dealFor(next, incomingDriverId);
+      if (incomingDeal) {
+        next.deals[incomingDriverId] = { ...incomingDeal, teamId: next.playerTeamId! };
+      }
+      const outgoingDeal = dealFor(next, outgoingDriverId);
+      if (outgoingDeal) {
+        next.deals[outgoingDriverId] = { ...outgoingDeal, teamId: incomingTeam };
+      }
 
       const incomingName =
         DRIVER_BY_ID[incomingDriverId]?.lastName ??
         next.academyDrivers.find((entry) => entry.id === incomingDriverId)?.lastName ??
         incomingDriverId;
       post(next, 'TRANSFER', `Signed ${incomingName}`, -fee);
+
+      announceTransfer(next, {
+        driverId: incomingDriverId,
+        fromTeamId: incomingTeam,
+        toTeamId: next.playerTeamId!,
+        fee,
+        salary: incomingDeal?.salary ?? 0,
+        seasons: incomingDeal?.seasonsRemaining ?? 1,
+        role: raceDriversOf(next, next.playerTeamId).includes(incomingDriverId)
+          ? 'RACE'
+          : 'RESERVE',
+      });
+      break;
+    }
+
+    /* -------------------------- squad and seats ------------------------ */
+
+    case 'SET_LINEUP': {
+      if (!next.playerTeamId) return refuse('No team selected.');
+      setLineup(next, next.playerTeamId, event.order);
+      break;
+    }
+
+    case 'PROMOTE_DRIVER': {
+      if (next.driverTeams[event.driverId] !== next.playerTeamId) {
+        return refuse('You can only pick from your own squad.');
+      }
+
+      const result = promoteToRaceSeat(next, event.driverId);
+      if (!result.ok) return refuse(result.reason);
+
+      const promoted = DRIVER_BY_ID[event.driverId]?.lastName ?? event.driverId;
+      const demoted = result.demotedDriverId
+        ? (DRIVER_BY_ID[result.demotedDriverId]?.lastName ??
+           next.academyDrivers.find((entry) => entry.id === result.demotedDriverId)?.lastName ??
+           result.demotedDriverId)
+        : null;
+
+      /* The demoted driver is still ours — that is the whole difference
+       * from how promotion used to work. Their contract is untouched and
+       * they are available again the moment the player wants them. */
+      for (const driverId of squadOf(next, next.playerTeamId)) {
+        const deal = next.deals[driverId];
+        if (!deal) continue;
+        deal.role = raceDriversOf(next, next.playerTeamId).includes(driverId)
+          ? 'RACE'
+          : 'RESERVE';
+      }
+
+      postMail(next, {
+        category: 'DRIVER',
+        from: 'Sporting Director',
+        subject: `${promoted} into the race seat`,
+        driverId: event.driverId,
+        body: demoted
+          ? `${promoted} takes the second car from the next session. ${demoted} drops to reserve — still under contract, still ours, and available the moment we want him back in it.\n\nExpect ${demoted} to have something to say about it.`
+          : `${promoted} takes the open race seat from the next session.`,
+      });
+
+      if (result.demotedDriverId) {
+        next.driverConditions[result.demotedDriverId] = applyConditionEvent(
+          next.driverConditions[result.demotedDriverId] ??
+            blankCondition(result.demotedDriverId),
+          'RESULT_POOR',
+          1.4,
+        );
+      }
+      break;
+    }
+
+    case 'DEMOTE_DRIVER': {
+      if (next.driverTeams[event.driverId] !== next.playerTeamId) {
+        return refuse('You can only pick from your own squad.');
+      }
+
+      const result = demoteToReserve(next, event.driverId);
+      if (!result.ok) return refuse(result.reason);
+
+      for (const driverId of squadOf(next, next.playerTeamId)) {
+        const deal = next.deals[driverId];
+        if (!deal) continue;
+        deal.role = raceDriversOf(next, next.playerTeamId).includes(driverId)
+          ? 'RACE'
+          : 'RESERVE';
+      }
+
+      next.driverConditions[event.driverId] = applyConditionEvent(
+        next.driverConditions[event.driverId] ?? blankCondition(event.driverId),
+        'RESULT_TERRIBLE',
+        1.2,
+      );
+      break;
+    }
+
+    case 'RELEASE_DRIVER': {
+      if (next.driverTeams[event.driverId] !== next.playerTeamId) {
+        return refuse('You can only release your own drivers.');
+      }
+      if (squadOf(next, next.playerTeamId).length <= GRID_SEATS_PER_TEAM) {
+        return refuse('You cannot go below two drivers — the entry list needs both cars.');
+      }
+
+      const team = next.teams.find((entry) => entry.teamId === next.playerTeamId);
+      if (!team) return refuse('No team selected.');
+
+      // Tearing up a driver's deal costs the balance of it, halved.
+      const severance = releaseCost(next, event.driverId);
+      if (team.budget < severance) {
+        return refuse(
+          `Releasing him costs ${formatMillions(severance)} in severance; you have ${formatMillions(team.budget)}.`,
+        );
+      }
+
+      const name =
+        DRIVER_BY_ID[event.driverId]?.lastName ??
+        next.academyDrivers.find((entry) => entry.id === event.driverId)?.lastName ??
+        event.driverId;
+
+      leaveSquad(next, event.driverId);
+      delete next.deals[event.driverId];
+      next.transferList = next.transferList.filter(
+        (entry) => entry.driverId !== event.driverId,
+      );
+      if (severance > 0) post(next, 'TRANSFER', `${name} released`, -severance);
+
+      postMail(next, {
+        category: 'TRANSFER',
+        from: 'Sporting Director',
+        subject: `${name} released`,
+        driverId: event.driverId,
+        body: `${name}'s contract has been terminated${severance > 0 ? ` at a cost of ${formatMillions(severance)}` : ''}. He is a free agent and any team on the grid can talk to him.`,
+      });
+      break;
+    }
+
+    /* ------------------------------- talks ----------------------------- */
+
+    case 'APPROACH_DRIVER': {
+      if (!next.playerTeamId) return refuse('No team selected.');
+      if (next.driverTeams[event.driverId] === next.playerTeamId) {
+        return refuse('That driver already races for you.');
+      }
+      if (next.negotiations.some((entry) => entry.driverId === event.driverId)) {
+        return refuse('You are already in talks with that driver.');
+      }
+      if (!squadHasRoom(next, next.playerTeamId)) {
+        return refuse(
+          `Your squad is full at ${MAX_SQUAD_SIZE} drivers. Release or sell somebody first.`,
+        );
+      }
+
+      /* A free race seat means a race offer; a full line-up means the
+       * conversation starts as a reserve one, and the driver's interest
+       * is judged on exactly that. */
+      const role: DriverRole = openSeatsAt(next, next.playerTeamId) > 0 ? 'RACE' : 'RESERVE';
+      const opened = openNegotiation(next, event.driverId, role);
+      if (!opened.ok) return refuse(opened.reason);
+
+      next.negotiations = [opened.negotiation, ...next.negotiations].slice(0, 12);
+
+      const driverName =
+        DRIVER_BY_ID[event.driverId]?.lastName ??
+        next.academyDrivers.find((entry) => entry.id === event.driverId)?.lastName ??
+        event.driverId;
+
+      postMail(next, {
+        category: 'TRANSFER',
+        from: `${driverName}'s management`,
+        subject: `Re: your approach for ${driverName}`,
+        importance: 'HIGH',
+        driverId: event.driverId,
+        negotiationId: opened.negotiation.id,
+        body:
+          `${opened.negotiation.note}\n\n` +
+          (opened.negotiation.stage === 'REJECTED'
+            ? 'There is nothing further to discuss at this time.'
+            : `Terms sought:\n` +
+              `Salary: ${formatMillions(opened.negotiation.asking.salary)} per season\n` +
+              `Term: ${opened.negotiation.asking.seasons} season${opened.negotiation.asking.seasons === 1 ? '' : 's'}\n` +
+              `Signing bonus: ${formatMillions(opened.negotiation.asking.signingBonus)}\n` +
+              (opened.negotiation.asking.transferFee > 0
+                ? `Transfer fee to ${gridTeamOf(opened.negotiation.fromTeamId).name}: ${formatMillions(opened.negotiation.asking.transferFee)}\n`
+                : 'He is a free agent — no fee is payable.\n') +
+              `Role: ${role === 'RACE' ? 'race seat' : 'reserve'}`),
+      });
+      break;
+    }
+
+    case 'WITHDRAW_APPROACH': {
+      const negotiation = next.negotiations.find((entry) => entry.id === event.negotiationId);
+      if (!negotiation) return refuse('No such negotiation.');
+      next.negotiations = next.negotiations.filter((entry) => entry.id !== event.negotiationId);
+      break;
+    }
+
+    case 'OFFER_CONTRACT': {
+      const index = next.negotiations.findIndex((entry) => entry.id === event.negotiationId);
+      if (index < 0) return refuse('No such negotiation.');
+
+      const negotiation = next.negotiations[index]!;
+      if (negotiation.stage === 'AGREED') return refuse('That deal is already done.');
+      if (negotiation.stage === 'REJECTED' || negotiation.stage === 'WITHDRAWN') {
+        return refuse('Those talks have collapsed. You would have to start again.');
+      }
+      if (event.offer.seasons < 1 || event.offer.seasons > MAX_CONTRACT_SEASONS) {
+        return refuse(`A contract runs between 1 and ${MAX_CONTRACT_SEASONS} seasons.`);
+      }
+
+      const team = next.teams.find((entry) => entry.teamId === next.playerTeamId);
+      if (!team) return refuse('No team selected.');
+
+      /* The money has to be there before the offer is made, not after it
+       * is accepted — an offer you cannot honour is not an offer. */
+      const upfront = signingCost(event.offer);
+      if (team.budget < upfront) {
+        return refuse(
+          `That offer commits ${formatMillions(upfront)} up front; you have ${formatMillions(team.budget)}.`,
+        );
+      }
+
+      const verdict = judgeOffer(next, negotiation, event.offer);
+      const driverName =
+        DRIVER_BY_ID[negotiation.driverId]?.lastName ??
+        next.academyDrivers.find((entry) => entry.id === negotiation.driverId)?.lastName ??
+        negotiation.driverId;
+
+      if (!verdict.accepted) {
+        next.negotiations[index] = {
+          ...negotiation,
+          stage: verdict.collapsed ? 'REJECTED' : 'CONSIDERING',
+          rejections: negotiation.rejections + 1,
+          offer: event.offer,
+          asking: verdict.counter ?? negotiation.asking,
+          note: verdict.note,
+        };
+
+        postMail(next, {
+          category: 'TRANSFER',
+          from: `${driverName}'s management`,
+          subject: verdict.collapsed
+            ? `Talks ended — ${driverName}`
+            : `Counter-offer — ${driverName}`,
+          importance: 'HIGH',
+          driverId: negotiation.driverId,
+          ...(verdict.collapsed ? {} : { negotiationId: negotiation.id }),
+          body:
+            verdict.note +
+            (verdict.counter
+              ? `\n\nWhat would be signed today:\n` +
+                `Salary: ${formatMillions(verdict.counter.salary)} per season\n` +
+                `Term: ${verdict.counter.seasons} season${verdict.counter.seasons === 1 ? '' : 's'}\n` +
+                `Signing bonus: ${formatMillions(verdict.counter.signingBonus)}\n` +
+                (verdict.counter.transferFee > 0
+                  ? `Transfer fee: ${formatMillions(verdict.counter.transferFee)}`
+                  : 'No fee payable.')
+              : ''),
+        });
+        break;
+      }
+
+      /* Agreed. The seat, the contract and the money all land together. */
+      const fromTeamId = negotiation.fromTeamId;
+      if (fromTeamId) leaveSquad(next, negotiation.driverId);
+      joinSquad(next, negotiation.driverId, next.playerTeamId!);
+
+      /* A driver signed to race goes straight into a seat; one signed as
+       * a reserve joins the bench and stays there until promoted. */
+      if (event.offer.role === 'RACE' && !raceDriversOf(next, next.playerTeamId).includes(negotiation.driverId)) {
+        promoteToRaceSeat(next, negotiation.driverId);
+      }
+
+      next.deals[negotiation.driverId] = dealFromOffer(next, negotiation.driverId, event.offer);
+      next.negotiations = next.negotiations.filter((entry) => entry.id !== negotiation.id);
+
+      if (upfront > 0) post(next, 'TRANSFER', `Signed ${driverName}`, -upfront);
+
+      if (!next.driverConditions[negotiation.driverId]) {
+        next.driverConditions[negotiation.driverId] = blankCondition(negotiation.driverId, 78);
+      }
+      if (!next.driverRecords[negotiation.driverId]) {
+        const driver = DRIVER_BY_ID[negotiation.driverId];
+        next.driverRecords[negotiation.driverId] = {
+          driverId: negotiation.driverId,
+          age: driver?.age ?? 26,
+          deltas: {},
+          seasonsRun: 0,
+          careerPoints: 0,
+          careerWins: 0,
+          careerPodiums: 0,
+        };
+      }
+
+      announceTransfer(next, {
+        driverId: negotiation.driverId,
+        fromTeamId,
+        toTeamId: next.playerTeamId!,
+        fee: event.offer.transferFee,
+        salary: event.offer.salary,
+        seasons: event.offer.seasons,
+        role: event.offer.role,
+      });
+      break;
+    }
+
+    case 'RENEW_CONTRACT': {
+      if (next.driverTeams[event.driverId] !== next.playerTeamId) {
+        return refuse('You can only renew your own drivers.');
+      }
+      if (event.seasons < 1 || event.seasons > MAX_CONTRACT_SEASONS) {
+        return refuse(`A contract runs between 1 and ${MAX_CONTRACT_SEASONS} seasons.`);
+      }
+
+      const current = dealFor(next, event.driverId);
+      const asked = askingTerms(next, event.driverId, current?.role ?? 'RACE');
+      /* Their own team gets a discount — a driver already settled
+       * somewhere is cheaper to keep than to buy. */
+      const floor = Math.round(asked.salary * 0.88);
+      if (event.salary < floor) {
+        return refuse(
+          `He will not re-sign for that. ${formatMillions(floor)} per season is the number.`,
+        );
+      }
+
+      next.deals[event.driverId] = {
+        driverId: event.driverId,
+        teamId: next.playerTeamId!,
+        salary: event.salary,
+        seasonsRemaining: event.seasons,
+        signedInSeason: next.season,
+        signingBonus: 0,
+        buyoutClause: Math.round(event.salary * (1.4 + event.seasons * 0.35)),
+        role: current?.role ?? 'RACE',
+      };
+
+      next.driverConditions[event.driverId] = applyConditionEvent(
+        next.driverConditions[event.driverId] ?? blankCondition(event.driverId),
+        'RESULT_GOOD',
+        1.2,
+      );
+
+      announceContract(next, event.driverId, event.salary, event.seasons);
+      break;
+    }
+
+    /* ------------------------ offering a driver out -------------------- */
+
+    case 'LIST_DRIVER': {
+      if (next.driverTeams[event.driverId] !== next.playerTeamId) {
+        return refuse('You can only offer out your own drivers.');
+      }
+      if (next.transferList.some((entry) => entry.driverId === event.driverId)) {
+        return refuse('He is already available.');
+      }
+      if (squadOf(next, next.playerTeamId).length <= GRID_SEATS_PER_TEAM) {
+        return refuse('You would be left short of a second car. Sign a replacement first.');
+      }
+
+      next.transferList = [
+        ...next.transferList,
+        {
+          driverId: event.driverId,
+          askingFee: Math.max(0, Math.round(event.askingFee)),
+          listedInSeason: next.season,
+          listedInRound: next.round,
+        },
+      ];
+
+      const name =
+        DRIVER_BY_ID[event.driverId]?.lastName ??
+        next.academyDrivers.find((entry) => entry.id === event.driverId)?.lastName ??
+        event.driverId;
+
+      postMail(next, {
+        category: 'TRANSFER',
+        from: 'Sporting Director',
+        subject: `${name} made available`,
+        driverId: event.driverId,
+        body: `The paddock has been told we will listen to offers for ${name} at ${formatMillions(event.askingFee)}.\n\nExpect the phone to ring between rounds. Nothing is binding until you accept a bid.`,
+      });
+      break;
+    }
+
+    case 'UNLIST_DRIVER': {
+      next.transferList = next.transferList.filter(
+        (entry) => entry.driverId !== event.driverId,
+      );
+      break;
+    }
+
+    case 'RESPOND_TO_BID': {
+      const index = next.transferOffers.findIndex((entry) => entry.id === event.offerId);
+      if (index < 0) return refuse('That offer is no longer on the table.');
+
+      const offer = next.transferOffers[index]!;
+      if (offer.status !== 'OPEN') return refuse('That offer has already been answered.');
+
+      if (!event.accept) {
+        next.transferOffers[index] = { ...offer, status: 'DECLINED' };
+        break;
+      }
+
+      if (next.driverTeams[offer.driverId] !== next.playerTeamId) {
+        return refuse('That driver is no longer yours to sell.');
+      }
+      if (squadOf(next, next.playerTeamId).length <= GRID_SEATS_PER_TEAM) {
+        return refuse('Selling him would leave you a car short. Sign a replacement first.');
+      }
+
+      const name =
+        DRIVER_BY_ID[offer.driverId]?.lastName ??
+        next.academyDrivers.find((entry) => entry.id === offer.driverId)?.lastName ??
+        offer.driverId;
+
+      /* The buying team's squad grows by one; if they have a seat free
+       * he races for them, and if not he is their reserve. Nobody is
+       * displaced there either. */
+      leaveSquad(next, offer.driverId);
+      joinSquad(next, offer.driverId, offer.fromTeamId);
+      next.deals[offer.driverId] = {
+        ...(dealFor(next, offer.driverId) ?? {
+          driverId: offer.driverId,
+          salary: offer.salaryRelieved,
+          seasonsRemaining: 2,
+          signedInSeason: next.season,
+          signingBonus: 0,
+          buyoutClause: offer.fee,
+          role: 'RACE' as const,
+        }),
+        driverId: offer.driverId,
+        teamId: offer.fromTeamId,
+        role: raceDriversOf(next, offer.fromTeamId).includes(offer.driverId)
+          ? 'RACE'
+          : 'RESERVE',
+      };
+
+      next.transferOffers[index] = { ...offer, status: 'ACCEPTED' };
+      next.transferList = next.transferList.filter(
+        (entry) => entry.driverId !== offer.driverId,
+      );
+      post(next, 'TRANSFER', `${name} sold to ${gridTeamOf(offer.fromTeamId).shortName}`, offer.fee);
+
+      announceTransfer(next, {
+        driverId: offer.driverId,
+        fromTeamId: next.playerTeamId!,
+        toTeamId: offer.fromTeamId,
+        fee: offer.fee,
+        salary: offer.salaryRelieved,
+        seasons: 2,
+        role: next.deals[offer.driverId]!.role,
+      });
+      break;
+    }
+
+    /* ------------------------------ the inbox -------------------------- */
+
+    case 'READ_MAIL': {
+      next.mail = next.mail.map((message) =>
+        message.id === event.mailId ? { ...message, read: true } : message,
+      );
+      break;
+    }
+
+    case 'READ_ALL_MAIL': {
+      next.mail = next.mail.map((message) => ({ ...message, read: true }));
+      break;
+    }
+
+    case 'DELETE_MAIL': {
+      next.mail = next.mail.filter((message) => message.id !== event.mailId);
       break;
     }
 
@@ -987,6 +1573,9 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
 
         next.driverConditions[entry.driverId] = updated;
       }
+
+      // Saturday, as the paddock saw it.
+      announceQualifying(next, next.qualifying);
       break;
     }
 
@@ -1051,8 +1640,21 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
       const prospect = next.prospects.find((entry) => entry.id === event.prospectId);
       if (!prospect) return refuse('That prospect is no longer available.');
       if (next.driverTeams[prospect.id]) return refuse('That driver already has a seat.');
-      if (next.driverTeams[event.outgoingDriverId] !== next.playerTeamId) {
+
+      /* Promoting a junior used to mean posting somebody else out of the
+       * door in the same breath, because a squad was two drivers and the
+       * only way in was for somebody to leave. A junior now simply
+       * joins: they take a race seat if one is free and go on the bench
+       * if not, and nobody is released unless the player explicitly
+       * names somebody to release. */
+      const releasing = event.outgoingDriverId ?? null;
+      if (releasing && next.driverTeams[releasing] !== next.playerTeamId) {
         return refuse('You can only release one of your own drivers.');
+      }
+      if (!releasing && !squadHasRoom(next, next.playerTeamId!)) {
+        return refuse(
+          `Your squad is full at ${MAX_SQUAD_SIZE} drivers. Release somebody before signing another.`,
+        );
       }
 
       const team = next.teams.find((entry) => entry.teamId === next.playerTeamId);
@@ -1068,9 +1670,24 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         );
       }
 
-      // The released driver becomes a free agent rather than vanishing.
-      delete next.driverTeams[event.outgoingDriverId];
-      next.driverTeams[prospect.id] = next.playerTeamId!;
+      // A released driver becomes a free agent rather than vanishing.
+      if (releasing) leaveSquad(next, releasing);
+      joinSquad(next, prospect.id, next.playerTeamId!);
+
+      /* Straight into the seat the released driver vacated; otherwise
+       * wherever there is room, which on a full line-up is the bench. */
+      next.deals[prospect.id] = {
+        driverId: prospect.id,
+        teamId: next.playerTeamId!,
+        salary: prospect.salary,
+        seasonsRemaining: 3,
+        signedInSeason: next.season,
+        signingBonus: 0,
+        buyoutClause: Math.round(prospect.salary * 2.2),
+        role: raceDriversOf(next, next.playerTeamId).includes(prospect.id)
+          ? 'RACE'
+          : 'RESERVE',
+      };
 
       /* The intake is rebuilt every season, so a graduate has to be kept
        * somewhere that survives the new year — otherwise they hold a seat
@@ -1097,6 +1714,16 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
       }
 
       post(next, 'TRANSFER', `Signed ${prospect.firstName} ${prospect.lastName}`, -fee);
+
+      announceTransfer(next, {
+        driverId: prospect.id,
+        fromTeamId: '',
+        toTeamId: next.playerTeamId!,
+        fee,
+        salary: prospect.salary,
+        seasons: 3,
+        role: next.deals[prospect.id]!.role,
+      });
       break;
     }
 
@@ -1299,6 +1926,10 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         const operations = Math.round(roundOperatingCost(next) * logisticsMultiplier(next));
         post(next, 'OPERATIONS', 'Race weekend operations', -operations);
       }
+
+      /* The result, and everything the paddock has to say about it. Last,
+       * so the standings and the books it quotes are already settled. */
+      announceRace(next, event.result);
       break;
     }
 
@@ -1310,6 +1941,49 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
        * the middle: nobody stays furious, and nobody stays euphoric. */
       for (const [driverId, condition] of Object.entries(next.driverConditions)) {
         next.driverConditions[driverId] = recoverBetweenRounds(condition);
+      }
+
+      /* The paddock does not stop between races. Rivals come in for the
+       * player's drivers, the squad says how it is finding things, and
+       * the press files its copy — all of it before the round is
+       * advanced, so it is filed against the weekend it belongs to. */
+      if (next.playerTeamId) {
+        const bids = rivalBids(next);
+        for (const bid of bids) {
+          if (next.transferOffers.some((entry) => entry.id === bid.id)) continue;
+          next.transferOffers = [bid, ...next.transferOffers].slice(0, 20);
+
+          const name =
+            DRIVER_BY_ID[bid.driverId]?.lastName ??
+            next.academyDrivers.find((entry) => entry.id === bid.driverId)?.lastName ??
+            bid.driverId;
+
+          postMail(next, {
+            category: 'TRANSFER',
+            from: gridTeamOf(bid.fromTeamId).name,
+            subject: `Offer for ${name} — ${formatMillions(bid.fee)}`,
+            importance: 'HIGH',
+            driverId: bid.driverId,
+            offerId: bid.id,
+            body:
+              `${bid.note}\n\n` +
+              `Fee offered: ${formatMillions(bid.fee)}\n` +
+              `Salary they take off our books: ${formatMillions(bid.salaryRelieved)} per season\n\n` +
+              `The offer stands until you answer it. Turning it down costs nothing but the goodwill.`,
+          });
+        }
+
+        /* Anything still open from an earlier round has been overtaken
+         * by events — a bid is a moment, not a standing position. */
+        next.transferOffers = next.transferOffers.map((entry) =>
+          entry.status === 'OPEN' && entry.round < next.round
+            ? { ...entry, status: 'EXPIRED' }
+            : entry,
+        );
+
+        driverMoodPosts(next);
+        rumourPosts(next);
+        championshipPosts(next);
       }
 
       /* Part programmes tick down and fit themselves when ready. Every
@@ -1369,6 +2043,33 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         const moves = runSillySeason(next);
         applyTransferMoves(next, moves);
         next.lastTransferWindow = moves;
+        announceSillySeason(next, moves);
+
+        /* Contracts run down with the year like every other deal in the
+         * save. One that expires does not end the driver's career — it
+         * simply means their next negotiation starts from nothing. */
+        for (const deal of Object.values(next.deals)) {
+          deal.seasonsRemaining -= 1;
+        }
+        for (const [driverId, deal] of Object.entries(next.deals)) {
+          if (deal.seasonsRemaining > 0) continue;
+          delete next.deals[driverId];
+          if (deal.teamId !== next.playerTeamId) continue;
+
+          postMail(next, {
+            category: 'TRANSFER',
+            from: 'Sporting Director',
+            subject: `${DRIVER_BY_ID[driverId]?.lastName ?? driverId} is out of contract`,
+            importance: 'HIGH',
+            driverId,
+            body: `His deal has run out. He is still in the squad for now, but nothing is holding him here — agree new terms before somebody else does.`,
+          });
+        }
+
+        // Talks do not survive a winter; the market has moved on.
+        next.negotiations = [];
+        next.transferOffers = [];
+        next.transferList = [];
 
         /* Everyone gets a year older and moves along their curve. This
          * has to happen after the silly season, which judges drivers on

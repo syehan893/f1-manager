@@ -186,6 +186,15 @@ export interface CarState {
   bestLapMs: number | null;
   currentLapMs: number;
   tyre: TyreState;
+  /**
+   * The compound the crew will bolt on at this car's next stop. The pit
+   * wall's selector reads this rather than keeping a copy of its own, so
+   * what the screen says and what the crew is holding cannot drift apart
+   * — which they used to, every time a car came in.
+   */
+  nextCompound: TyreCompound;
+  /** True while a stop is called for but not yet being served. */
+  pitRequested: boolean;
   fuelKg: number;
   status: DriverStatus;
   pitStops: number;
@@ -407,6 +416,8 @@ export type ViewId =
   | 'career-market'
   | 'career-rnd'
   | 'career-calendar'
+  | 'career-mail'
+  | 'career-social'
   /* Account */
   | 'settings'
   | 'profile';

@@ -114,6 +114,34 @@ export function isWrongTyre(compound: TyreCompound, wetness: number): boolean {
   return offWindow(compound, wetness) > 1.25;
 }
 
+/**
+ * The compound to actually bolt on, given what was asked for.
+ *
+ * There are two different callers here and they want opposite things.
+ * A plan nobody looked at since Saturday has to be overruled — no team
+ * starts a downpour on slicks because a dry race was written down. But a
+ * compound the pit wall picked *during* the race is a decision, and
+ * overruling it is the bug: asking for wets in standing water used to
+ * come back as inters, and asking for inters on a drying track used to
+ * come back as wets, because `bestCompoundFor` only ever reads the
+ * track. Between the two wet compounds especially, which one to run is
+ * exactly the call a strategist is paid to make.
+ *
+ * So: an explicit call stands. Everything else is reconciled with the
+ * conditions, and only when the tyre asked for is plainly wrong for them.
+ */
+export function compoundToFit(
+  wetness: number,
+  chosen: TyreCompound,
+  explicit = false,
+): TyreCompound {
+  if (explicit) return chosen;
+  if (!isWrongTyre(chosen, wetness)) return chosen;
+  /* A wet tyre that no longer suits the track cannot be its own dry
+   * fallback, or a drying race would keep re-fitting wets forever. */
+  return bestCompoundFor(wetness, isWetCompound(chosen) ? 'MEDIUM' : chosen);
+}
+
 /* ------------------------------ readouts ------------------------------- */
 
 export function conditionLabel(wetness: number): string {

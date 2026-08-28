@@ -1,6 +1,8 @@
 import {
   Car,
   Gamepad2,
+  Inbox,
+  Radio as RadioTower,
   CalendarCog,
   CalendarDays,
   CircleUser,
@@ -47,6 +49,8 @@ export const NAV_ITEMS: NavItem[] = [
 
   { id: 'career-season', label: 'Season Setup', icon: CalendarCog, group: 'CAREER' },
   { id: 'career-market', label: 'Driver Market', icon: UsersRound, group: 'CAREER' },
+  { id: 'career-mail', label: 'Mail', icon: Inbox, group: 'CAREER' },
+  { id: 'career-social', label: 'Social', icon: RadioTower, group: 'CAREER' },
   { id: 'career-rnd', label: 'R&D Center', icon: FlaskConical, group: 'CAREER' },
   { id: 'staff', label: 'Staff', icon: HardHat, group: 'CAREER' },
   { id: 'sponsors', label: 'Sponsors', icon: Handshake, group: 'CAREER' },

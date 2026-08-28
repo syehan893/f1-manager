@@ -31,7 +31,17 @@ export interface GameContextValue {
 
   /* derived helpers */
   playerTeam: GridTeam | null;
+  /**
+   * The player's two race drivers — the cars that actually take the
+   * grid. Strategy, the pit wall and the timing screens all mean this.
+   */
   playerDrivers: Driver[];
+  /**
+   * Everyone the player has under contract, race drivers first and
+   * reserves after them. The management screens mean this one: a squad
+   * can be bigger than the entry list.
+   */
+  playerSquad: Driver[];
   currentTrack: Track | null;
   /** This season's calendar, in order. */
   calendar: Track[];
@@ -41,6 +51,12 @@ export interface GameContextValue {
   components: EngineComponent[];
   /** Every driver with their live team assignment applied. */
   roster: Driver[];
+  /**
+   * The entry list: two cars per team and no more, whatever the squads
+   * behind them look like. This is what qualifying and the race are run
+   * from — a reserve is on the books, not on the grid.
+   */
+  gridRoster: Driver[];
 }
 
 export const GameContext = createContext<GameContextValue | null>(null);

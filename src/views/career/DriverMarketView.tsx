@@ -1,6 +1,16 @@
 import { useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { ArrowRightLeft, Search, Sparkles, Users, UsersRound } from 'lucide-react';
+import {
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Handshake,
+  Search,
+  Sparkles,
+  Tag,
+  UserMinus,
+  Users,
+  UsersRound,
+} from 'lucide-react';
 import { Panel } from '@/components/ui/Panel';
 import { Badge } from '@/components/ui/Badge';
 import { StatBar } from '@/components/ui/StatBar';
@@ -10,7 +20,18 @@ import { GameButton } from '@/components/game/GameButton';
 import { driverRating, gridTeamOf } from '@/data/grid2026';
 import { cx, flagEmoji, formatCurrency } from '@/lib/format';
 import { prospectToDriver, scoutedRange } from '@/game/driverDevelopment';
+import {
+  MAX_CONTRACT_SEASONS,
+  askingTerms,
+  dealFor,
+  interestIn,
+  releaseCost,
+  sellability,
+  transferAsk,
+} from '@/game/contracts';
+import { GRID_SEATS_PER_TEAM, MAX_SQUAD_SIZE, squadHasRoom } from '@/game/roster';
 import { useGame } from '@/state/gameContext';
+import type { ContractOffer, DriverRole } from '@/game/types';
 import type { Driver } from '@/types';
 
 type SortKey = 'rating' | 'age' | 'salary';
@@ -18,34 +39,67 @@ type SortKey = 'rating' | 'age' | 'salary';
 /** Ages past this are shown in red — the driver is on the way down. */
 const DECAY_AGE = 34;
 
-function ContractCard({
+/* ---------------------------------------------------------------------
+ * Your squad.
+ *
+ * A team is no longer two drivers. The first two names race; anybody
+ * after them is a reserve, paid and developing and waiting for a call.
+ * Promotion swaps the two around — it does not send anybody home, which
+ * is the whole point of having a bench.
+ * ------------------------------------------------------------------- */
+
+function SquadCard({
   driver,
   accent,
-  onRelease,
-  releaseLabel,
+  racing,
+  seatIndex,
 }: {
   driver: Driver;
   accent: string;
-  onRelease?: () => void;
-  releaseLabel?: string;
+  racing: boolean;
+  seatIndex: number;
 }) {
+  const { state, dispatch, playerSquad } = useGame();
+  const [listing, setListing] = useState(false);
+  if (!state) return null;
+
+  const deal = dealFor(state, driver.id);
+  const listed = state.transferList.find((entry) => entry.driverId === driver.id);
+  const severance = releaseCost(state, driver.id);
+  const canDrop = playerSquad.length > GRID_SEATS_PER_TEAM;
+
   return (
     <motion.div
       layout
-      className="rounded-lg border border-carbon-600/70 bg-carbon-900/40 p-3"
+      className={cx(
+        'rounded-lg border p-3',
+        racing
+          ? 'border-neon-cyan/35 bg-neon-cyan/[0.05]'
+          : 'border-carbon-600/70 bg-carbon-900/40',
+      )}
     >
       <div className="flex items-center gap-3">
         <DriverPortrait driver={driver} teamColor={accent} size={48} />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[13px] font-bold text-chrome-100">
-            {driver.firstName} {driver.lastName}
-          </p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <p className="truncate text-[13px] font-bold text-chrome-100">
+              {driver.firstName} {driver.lastName}
+            </p>
+            <Badge tone={racing ? 'cyan' : 'neutral'} mono>
+              {racing ? `Car ${seatIndex + 1}` : 'Reserve'}
+            </Badge>
+            {listed && (
+              <Badge tone="amber" mono>
+                Listed
+              </Badge>
+            )}
+          </div>
           <p className="truncate text-[10px] text-chrome-500">
             {flagEmoji(driver.countryCode)} #{driver.carNumber} · Age{' '}
             <span className={cx(driver.age >= DECAY_AGE && 'font-bold text-neon-red')}>
               {driver.age}
             </span>{' '}
-            · {formatCurrency(driver.contract.salaryPerSeason, true)}/yr
+            · {formatCurrency(deal?.salary ?? driver.contract.salaryPerSeason, true)}/yr
           </p>
         </div>
         <span
@@ -56,36 +110,445 @@ function ContractCard({
         </span>
       </div>
 
+      {/* The contract, which is now a real thing that runs out. */}
       <div className="mt-3 grid grid-cols-3 gap-2">
         {(
           [
-            ['Pace', driver.attributes.pace],
-            ['Racecraft', driver.attributes.racecraft],
-            ['Consistency', driver.attributes.consistency],
+            ['Pace', String(driver.attributes.pace)],
+            ['Racecraft', String(driver.attributes.racecraft)],
+            [
+              'Contract',
+              deal
+                ? `${deal.seasonsRemaining} yr${deal.seasonsRemaining === 1 ? '' : 's'}`
+                : '—',
+            ],
           ] as const
         ).map(([label, value]) => (
           <div key={label}>
             <p className="text-[8.5px] tracking-widest text-chrome-500 uppercase">{label}</p>
-            <p className="font-mono text-[13px] font-bold text-chrome-100">{value}</p>
+            <p
+              className={cx(
+                'font-mono text-[13px] font-bold',
+                label === 'Contract' && deal && deal.seasonsRemaining <= 1
+                  ? 'text-neon-amber'
+                  : 'text-chrome-100',
+              )}
+            >
+              {value}
+            </p>
           </div>
         ))}
       </div>
 
-      {onRelease && (
+      <div className="mt-3 flex flex-wrap gap-2">
+        {racing ? (
+          <GameButton
+            size="sm"
+            variant="secondary"
+            disabled={!canDrop}
+            title={
+              canDrop
+                ? 'Drop to reserve and put the first reserve in the car.'
+                : 'You need a reserve to put in the car before benching anybody.'
+            }
+            onClick={() => dispatch({ type: 'DEMOTE_DRIVER', driverId: driver.id })}
+            icon={<ArrowDownToLine className="size-3" />}
+          >
+            Bench
+          </GameButton>
+        ) : (
+          <GameButton
+            size="sm"
+            title="Put him in the car. The second race driver drops to reserve — he stays under contract."
+            onClick={() => dispatch({ type: 'PROMOTE_DRIVER', driverId: driver.id })}
+            icon={<ArrowUpFromLine className="size-3" />}
+          >
+            Promote to race seat
+          </GameButton>
+        )}
+
+        {listed ? (
+          <GameButton
+            size="sm"
+            variant="secondary"
+            onClick={() => dispatch({ type: 'UNLIST_DRIVER', driverId: driver.id })}
+            icon={<Tag className="size-3" />}
+          >
+            Take off the market
+          </GameButton>
+        ) : (
+          <GameButton
+            size="sm"
+            variant="secondary"
+            disabled={!canDrop}
+            title={
+              canDrop
+                ? 'Tell the paddock you will listen to offers.'
+                : 'Selling him would leave you a car short.'
+            }
+            onClick={() => setListing((open) => !open)}
+            icon={<Tag className="size-3" />}
+          >
+            Offer out
+          </GameButton>
+        )}
+
         <GameButton
           size="sm"
-          variant="secondary"
-          className="mt-3 w-full"
-          onClick={onRelease}
-          icon={<ArrowRightLeft className="size-3" />}
+          variant="danger"
+          disabled={!canDrop}
+          title={
+            canDrop
+              ? `Terminate the contract — ${formatCurrency(severance, true)} in severance.`
+              : 'You cannot go below two drivers.'
+          }
+          onClick={() => dispatch({ type: 'RELEASE_DRIVER', driverId: driver.id })}
+          icon={<UserMinus className="size-3" />}
         >
-          {releaseLabel ?? 'Swap out'}
+          Release
         </GameButton>
+      </div>
+
+      {listing && !listed && (
+        <ListingForm
+          driverId={driver.id}
+          suggested={transferAsk(state, driver.id)}
+          onDone={() => setListing(false)}
+        />
+      )}
+
+      {deal && deal.seasonsRemaining <= 1 && (
+        <RenewalForm driverId={driver.id} role={deal.role} />
       )}
     </motion.div>
   );
 }
 
+function ListingForm({
+  driverId,
+  suggested,
+  onDone,
+}: {
+  driverId: string;
+  suggested: number;
+  onDone: () => void;
+}) {
+  const { dispatch } = useGame();
+  const [fee, setFee] = useState(suggested);
+
+  return (
+    <div className="mt-2.5 rounded-md border border-neon-amber/30 bg-neon-amber/[0.05] p-2.5">
+      <p className="mb-2 text-[10px] text-chrome-400">
+        Asking price. Bids usually come in under it, and nothing is binding until you accept
+        one.
+      </p>
+      <div className="flex items-center gap-2">
+        <input
+          type="number"
+          step={500_000}
+          min={0}
+          value={fee}
+          onChange={(event) => setFee(Number(event.target.value))}
+          aria-label="Asking fee"
+          className="min-w-0 flex-1 rounded-md border border-carbon-600 bg-carbon-900/80 px-2 py-1.5 font-mono text-[11px] text-chrome-100 focus:border-neon-cyan/50 focus:outline-none"
+        />
+        <GameButton
+          size="sm"
+          onClick={() => {
+            if (dispatch({ type: 'LIST_DRIVER', driverId, askingFee: fee })) onDone();
+          }}
+        >
+          List
+        </GameButton>
+      </div>
+    </div>
+  );
+}
+
+/** A deal in its final year is the one the player has to act on. */
+function RenewalForm({ driverId, role }: { driverId: string; role: DriverRole }) {
+  const { state, dispatch } = useGame();
+  const asked = state ? askingTerms(state, driverId, role) : null;
+  const floor = asked ? Math.round(asked.salary * 0.88) : 0;
+
+  const [salary, setSalary] = useState(floor);
+  const [seasons, setSeasons] = useState(2);
+
+  if (!asked) return null;
+
+  return (
+    <div className="mt-2.5 rounded-md border border-neon-amber/35 bg-neon-amber/[0.06] p-2.5">
+      <p className="mb-2 text-[10px] text-neon-amber">
+        Final year of his deal. He will re-sign at{' '}
+        <span className="font-mono font-bold">{formatCurrency(floor, true)}</span> per season or
+        better.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="number"
+          step={100_000}
+          min={0}
+          value={salary}
+          onChange={(event) => setSalary(Number(event.target.value))}
+          aria-label="Salary offered"
+          className="min-w-0 flex-1 rounded-md border border-carbon-600 bg-carbon-900/80 px-2 py-1.5 font-mono text-[11px] text-chrome-100 focus:border-neon-cyan/50 focus:outline-none"
+        />
+        <SegmentedControl
+          name={`renew-${driverId}`}
+          size="sm"
+          value={String(seasons)}
+          onChange={(value) => setSeasons(Number(value))}
+          options={Array.from({ length: MAX_CONTRACT_SEASONS }, (_, index) => ({
+            value: String(index + 1),
+            label: `${index + 1}y`,
+          }))}
+        />
+        <GameButton
+          size="sm"
+          onClick={() => dispatch({ type: 'RENEW_CONTRACT', driverId, salary, seasons })}
+          icon={<Handshake className="size-3" />}
+        >
+          Renew
+        </GameButton>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------
+ * Talks in progress.
+ *
+ * Approaching somebody is not signing them. They name a price, their
+ * team names another, and an offer that meets neither comes back as a
+ * counter — three times, and the conversation is over.
+ * ------------------------------------------------------------------- */
+
+function NegotiationPanel() {
+  const { state, dispatch, roster } = useGame();
+  if (!state || state.negotiations.length === 0) return null;
+
+  return (
+    <Panel
+      title="Contract Talks"
+      icon={<Handshake className="size-3.5" />}
+      actions={<Badge tone="cyan">{state.negotiations.length} open</Badge>}
+    >
+      <div className="grid gap-2.5">
+        {state.negotiations.map((negotiation) => {
+          const driver = roster.find((entry) => entry.id === negotiation.driverId);
+          const dead = negotiation.stage === 'REJECTED' || negotiation.stage === 'WITHDRAWN';
+
+          return (
+            <div
+              key={negotiation.id}
+              className={cx(
+                'rounded-lg border p-3',
+                dead
+                  ? 'border-carbon-700 bg-carbon-900/30 opacity-70'
+                  : 'border-neon-cyan/30 bg-neon-cyan/[0.04]',
+              )}
+            >
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <p className="text-[12px] font-bold text-chrome-100">
+                  {driver ? `${driver.firstName} ${driver.lastName}` : negotiation.driverId}
+                </p>
+                <Badge tone={dead ? 'red' : 'cyan'} mono>
+                  {negotiation.stage.toLowerCase()}
+                </Badge>
+                <Badge
+                  tone={
+                    negotiation.interest >= 65
+                      ? 'lime'
+                      : negotiation.interest >= 40
+                        ? 'amber'
+                        : 'red'
+                  }
+                  mono
+                >
+                  {negotiation.interest}% keen
+                </Badge>
+                {negotiation.fromTeamId && (
+                  <span className="font-mono text-[10px] text-chrome-500">
+                    from {gridTeamOf(negotiation.fromTeamId).shortName}
+                  </span>
+                )}
+              </div>
+
+              <p className="mb-2.5 text-[11px] leading-relaxed text-chrome-400">
+                {negotiation.note}
+              </p>
+
+              {!dead && <OfferForm negotiationId={negotiation.id} />}
+
+              <GameButton
+                size="sm"
+                variant="ghost"
+                className="mt-2"
+                onClick={() =>
+                  dispatch({ type: 'WITHDRAW_APPROACH', negotiationId: negotiation.id })
+                }
+              >
+                {dead ? 'Clear' : 'Walk away'}
+              </GameButton>
+            </div>
+          );
+        })}
+      </div>
+    </Panel>
+  );
+}
+
+function OfferForm({ negotiationId }: { negotiationId: string }) {
+  const { state, dispatch } = useGame();
+  const negotiation = state?.negotiations.find((entry) => entry.id === negotiationId);
+
+  const [draft, setDraft] = useState<ContractOffer | null>(null);
+  if (!negotiation) return null;
+
+  // Their asking terms are the starting point, so the first offer is one click.
+  const offer = draft ?? negotiation.asking;
+  const update = (patch: Partial<ContractOffer>) => setDraft({ ...offer, ...patch });
+
+  const upfront = offer.transferFee + offer.signingBonus;
+
+  return (
+    <div className="rounded-md border border-carbon-600/70 bg-carbon-900/50 p-2.5">
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="block">
+          <span className="text-[8.5px] tracking-widest text-chrome-500 uppercase">
+            Salary / season — they want {formatCurrency(negotiation.asking.salary, true)}
+          </span>
+          <input
+            type="number"
+            step={100_000}
+            min={0}
+            value={offer.salary}
+            onChange={(event) => update({ salary: Number(event.target.value) })}
+            className="mt-1 w-full rounded-md border border-carbon-600 bg-carbon-900/80 px-2 py-1.5 font-mono text-[11px] text-chrome-100 focus:border-neon-cyan/50 focus:outline-none"
+          />
+        </label>
+
+        <label className="block">
+          <span className="text-[8.5px] tracking-widest text-chrome-500 uppercase">
+            Signing bonus
+          </span>
+          <input
+            type="number"
+            step={100_000}
+            min={0}
+            value={offer.signingBonus}
+            onChange={(event) => update({ signingBonus: Number(event.target.value) })}
+            className="mt-1 w-full rounded-md border border-carbon-600 bg-carbon-900/80 px-2 py-1.5 font-mono text-[11px] text-chrome-100 focus:border-neon-cyan/50 focus:outline-none"
+          />
+        </label>
+
+        {negotiation.fromTeamId && (
+          <label className="block">
+            <span className="text-[8.5px] tracking-widest text-chrome-500 uppercase">
+              Transfer fee — {gridTeamOf(negotiation.fromTeamId).shortName} want{' '}
+              {formatCurrency(negotiation.asking.transferFee, true)}
+            </span>
+            <input
+              type="number"
+              step={500_000}
+              min={0}
+              value={offer.transferFee}
+              onChange={(event) => update({ transferFee: Number(event.target.value) })}
+              className="mt-1 w-full rounded-md border border-carbon-600 bg-carbon-900/80 px-2 py-1.5 font-mono text-[11px] text-chrome-100 focus:border-neon-cyan/50 focus:outline-none"
+            />
+          </label>
+        )}
+
+        <div>
+          <span className="text-[8.5px] tracking-widest text-chrome-500 uppercase">Term</span>
+          <SegmentedControl
+            className="mt-1"
+            name={`term-${negotiationId}`}
+            size="sm"
+            value={String(offer.seasons)}
+            onChange={(value) => update({ seasons: Number(value) })}
+            options={Array.from({ length: MAX_CONTRACT_SEASONS }, (_, index) => ({
+              value: String(index + 1),
+              label: `${index + 1}y`,
+            }))}
+          />
+        </div>
+      </div>
+
+      <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2">
+        <span className="font-mono text-[10px] text-chrome-500">
+          {formatCurrency(upfront, true)} up front ·{' '}
+          {formatCurrency(offer.salary, true)}/yr for {offer.seasons}y ·{' '}
+          {offer.role === 'RACE' ? 'race seat' : 'reserve'}
+        </span>
+        <GameButton
+          size="sm"
+          onClick={() => dispatch({ type: 'OFFER_CONTRACT', negotiationId, offer })}
+          icon={<Handshake className="size-3" />}
+        >
+          Put it to him
+        </GameButton>
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------- bids for our drivers --------------------- */
+
+function BidsPanel() {
+  const { state, dispatch, roster } = useGame();
+  const open = state?.transferOffers.filter((offer) => offer.status === 'OPEN') ?? [];
+  if (!state || open.length === 0) return null;
+
+  return (
+    <Panel
+      title="Offers For Your Drivers"
+      icon={<Tag className="size-3.5" />}
+      actions={<Badge tone="amber">{open.length} on the table</Badge>}
+    >
+      <div className="grid gap-2.5">
+        {open.map((offer) => {
+          const driver = roster.find((entry) => entry.id === offer.driverId);
+          return (
+            <div
+              key={offer.id}
+              className="rounded-lg border border-neon-amber/30 bg-neon-amber/[0.05] p-3"
+            >
+              <p className="text-[12px] font-bold text-chrome-100">
+                {gridTeamOf(offer.fromTeamId).name} bid{' '}
+                <span className="font-mono text-neon-amber">
+                  {formatCurrency(offer.fee, true)}
+                </span>{' '}
+                for {driver ? driver.lastName : offer.driverId}
+              </p>
+              <p className="mt-1 text-[11px] text-chrome-400">{offer.note}</p>
+              <p className="mt-1 font-mono text-[10px] text-chrome-500">
+                Takes {formatCurrency(offer.salaryRelieved, true)}/yr off the wage bill.
+              </p>
+              <div className="mt-2.5 flex gap-2">
+                <GameButton
+                  size="sm"
+                  onClick={() => dispatch({ type: 'RESPOND_TO_BID', offerId: offer.id, accept: true })}
+                >
+                  Accept
+                </GameButton>
+                <GameButton
+                  size="sm"
+                  variant="secondary"
+                  onClick={() =>
+                    dispatch({ type: 'RESPOND_TO_BID', offerId: offer.id, accept: false })
+                  }
+                >
+                  Turn it down
+                </GameButton>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Panel>
+  );
+}
 
 /* ---------------------------------------------------------------------
  * The junior intake.
@@ -96,12 +559,12 @@ function ContractCard({
  * cheap, fast, and short on everything that only laps teach.
  * ------------------------------------------------------------------- */
 
-function YoungTalent({ outgoingId }: { outgoingId: string | null }) {
-  const { state, playerDrivers, dispatch } = useGame();
+function YoungTalent() {
+  const { state, dispatch } = useGame();
   if (!state) return null;
 
   const unsigned = state.prospects.filter((prospect) => !state.driverTeams[prospect.id]);
-  const outgoing = outgoingId ?? playerDrivers[0]?.id;
+  const room = state.playerTeamId ? squadHasRoom(state, state.playerTeamId) : false;
 
   return (
     <Panel
@@ -116,7 +579,8 @@ function YoungTalent({ outgoingId }: { outgoingId: string | null }) {
       <p className="mb-3 text-[11px] leading-relaxed text-chrome-500">
         A fresh class every season, and it does not carry over — anyone still unsigned at the
         flag can be promoted by a rival instead. You are buying the ceiling, not the current
-        rating.
+        rating. Signing one adds him to the squad: he takes a race seat if you have one free,
+        and goes on the bench if you do not. Nobody is released to make room.
       </p>
 
       {unsigned.length === 0 ? (
@@ -171,23 +635,18 @@ function YoungTalent({ outgoingId }: { outgoingId: string | null }) {
                 <GameButton
                   size="sm"
                   className="mt-2.5"
-                  disabled={!outgoing}
+                  disabled={!room}
                   title={
-                    outgoing
-                      ? `Sign ${prospect.lastName} in place of your selected driver`
-                      : 'Select which of your drivers leaves first.'
+                    room
+                      ? `Sign ${prospect.lastName} into the squad`
+                      : `Your squad is full at ${MAX_SQUAD_SIZE}. Release or sell somebody first.`
                   }
                   onClick={() =>
-                    outgoing &&
-                    dispatch({
-                      type: 'SIGN_PROSPECT',
-                      prospectId: prospect.id,
-                      outgoingDriverId: outgoing,
-                    })
+                    dispatch({ type: 'SIGN_PROSPECT', prospectId: prospect.id })
                   }
                   icon={<Sparkles className="size-3" />}
                 >
-                  Promote
+                  Sign
                 </GameButton>
               </div>
             );
@@ -199,11 +658,10 @@ function YoungTalent({ outgoingId }: { outgoingId: string | null }) {
 }
 
 export function DriverMarketView() {
-  const { state, roster, playerTeam, playerDrivers, dispatch } = useGame();
+  const { state, roster, playerTeam, playerSquad, playerDrivers, dispatch } = useGame();
 
   const [query, setQuery] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('rating');
-  const [outgoingId, setOutgoingId] = useState<string | null>(null);
 
   const market = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -222,60 +680,52 @@ export function DriverMarketView() {
 
   if (!state || !playerTeam) return null;
 
-  const swap = (incomingDriverId: string) => {
-    const outgoing = outgoingId ?? playerDrivers[0]?.id;
-    if (!outgoing) return;
-    const ok = dispatch({
-      type: 'SWAP_DRIVER',
-      incomingDriverId,
-      outgoingDriverId: outgoing,
-    });
-    if (ok) setOutgoingId(null);
-  };
+  const racingIds = new Set(playerDrivers.map((driver) => driver.id));
+  const roomLeft = MAX_SQUAD_SIZE - playerSquad.length;
 
   return (
     <div className="grid gap-4">
-      {/* Your line-up */}
+      {/* Your squad */}
       <Panel
-        title="Your Race Seats"
+        title="Your Squad"
         icon={<Users className="size-3.5" />}
-        actions={<Badge tone="cyan">{playerTeam.name}</Badge>}
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone="cyan">{playerTeam.name}</Badge>
+            <Badge tone={roomLeft > 0 ? 'neutral' : 'amber'} mono>
+              {playerSquad.length}/{MAX_SQUAD_SIZE} under contract
+            </Badge>
+          </div>
+        }
       >
-        <p className="mb-3 text-[11px] text-chrome-500">
-          Pick which of your drivers leaves, then swap in a replacement from the grid below. It is
-          a straight exchange — the other team takes your driver in return, and both teams keep two
-          cars.
+        <p className="mb-3 text-[11px] leading-relaxed text-chrome-500">
+          Two cars start every race — the top two here. Anyone below them is a reserve: still
+          under contract, still paid, and one click from the car. Promoting a reserve drops the
+          second race driver to the bench rather than sending him anywhere.
         </p>
 
         <div className="grid gap-3 sm:grid-cols-2">
           <AnimatePresence initial={false}>
-            {playerDrivers.map((driver) => (
-              <div
+            {playerSquad.map((driver, index) => (
+              <SquadCard
                 key={driver.id}
-                className={cx(
-                  'rounded-lg transition-shadow',
-                  outgoingId === driver.id && 'ring-2 ring-neon-red/60',
-                )}
-              >
-                <ContractCard
-                  driver={driver}
-                  accent={playerTeam.color}
-                  releaseLabel={outgoingId === driver.id ? 'Selected to leave' : 'Select to swap out'}
-                  onRelease={() =>
-                    setOutgoingId(outgoingId === driver.id ? null : driver.id)
-                  }
-                />
-              </div>
+                driver={driver}
+                accent={playerTeam.color}
+                racing={racingIds.has(driver.id)}
+                seatIndex={index}
+              />
             ))}
           </AnimatePresence>
         </div>
       </Panel>
 
-      <YoungTalent outgoingId={outgoingId} />
+      <BidsPanel />
+      <NegotiationPanel />
+      <YoungTalent />
 
       {/* The rest of the grid */}
       <Panel
-        title="Driver Market — 2026 Grid"
+        title="Driver Market — The Grid"
         icon={<UsersRound className="size-3.5" />}
         flush
         actions={
@@ -305,10 +755,10 @@ export function DriverMarketView() {
         }
       >
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[720px] border-collapse">
+          <table className="w-full min-w-[820px] border-collapse">
             <thead>
               <tr className="border-b border-carbon-600/60 bg-carbon-900/60">
-                {['Driver', 'Team', 'Age', 'Pace', 'Racecraft', 'Rating', 'Salary', ''].map(
+                {['Driver', 'Team', 'Age', 'Rating', 'Wants', 'Fee', 'Keen', ''].map(
                   (label, index) => (
                     <th
                       key={label || index}
@@ -326,6 +776,18 @@ export function DriverMarketView() {
             <tbody>
               {market.map((driver) => {
                 const team = gridTeamOf(driver.teamId);
+                /* The role on offer follows from the squad: a free race
+                 * seat is a race offer, a full line-up is a reserve one,
+                 * and the driver's keenness is judged on exactly that. */
+                const role: DriverRole =
+                  playerDrivers.length < GRID_SEATS_PER_TEAM ? 'RACE' : 'RESERVE';
+                const terms = askingTerms(state, driver.id, role);
+                const keen = interestIn(state, driver.id, role);
+                const sale = sellability(state, driver.id);
+                const talking = state.negotiations.some(
+                  (entry) => entry.driverId === driver.id,
+                );
+
                 return (
                   <tr
                     key={driver.id}
@@ -367,21 +829,44 @@ export function DriverMarketView() {
                         {driver.age}
                       </span>
                     </td>
-                    <td className="px-3 py-2 text-right font-mono text-[12px] text-chrome-200">
-                      {driver.attributes.pace}
-                    </td>
-                    <td className="px-3 py-2 text-right font-mono text-[12px] text-chrome-200">
-                      {driver.attributes.racecraft}
-                    </td>
                     <td className="px-3 py-2 text-right font-mono text-[13px] font-bold text-neon-cyan">
                       {driverRating(driver)}
                     </td>
                     <td className="px-3 py-2 text-right font-mono text-[11px] text-chrome-300">
-                      {formatCurrency(driver.contract.salaryPerSeason, true)}
+                      {formatCurrency(terms.salary, true)}/yr
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-[11px] text-chrome-300">
+                      {formatCurrency(terms.transferFee, true)}
                     </td>
                     <td className="px-3 py-2 text-right">
-                      <GameButton size="sm" onClick={() => swap(driver.id)}>
-                        Swap in
+                      <span
+                        className={cx(
+                          'font-mono text-[11px] font-bold',
+                          keen >= 65
+                            ? 'text-neon-lime'
+                            : keen >= 40
+                              ? 'text-neon-amber'
+                              : 'text-neon-red',
+                        )}
+                      >
+                        {keen}%
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <GameButton
+                        size="sm"
+                        disabled={talking || !sale.willing}
+                        title={
+                          talking
+                            ? 'Already in talks.'
+                            : (sale.reason ??
+                              `Open talks about a ${role === 'RACE' ? 'race seat' : 'reserve role'}.`)
+                        }
+                        onClick={() =>
+                          dispatch({ type: 'APPROACH_DRIVER', driverId: driver.id })
+                        }
+                      >
+                        {talking ? 'In talks' : 'Approach'}
                       </GameButton>
                     </td>
                   </tr>
@@ -403,10 +888,12 @@ export function DriverMarketView() {
       {/* Line-up strength */}
       <Panel title="Line-up Strength" icon={<Users className="size-3.5" />}>
         <div className="grid gap-3 sm:grid-cols-2">
-          {playerDrivers.map((driver) => (
+          {playerSquad.map((driver) => (
             <div key={driver.id}>
               <StatBar
-                label={`${driver.firstName} ${driver.lastName}`}
+                label={`${driver.firstName} ${driver.lastName}${
+                  racingIds.has(driver.id) ? '' : ' (reserve)'
+                }`}
                 value={driverRating(driver)}
                 color={playerTeam.color}
               />
@@ -414,7 +901,7 @@ export function DriverMarketView() {
           ))}
         </div>
         <p className="mt-3 text-[11px] text-chrome-500">
-          Combined line-up rating{' '}
+          Race line-up rating{' '}
           <span className="font-mono font-bold text-chrome-200">
             {playerDrivers.length
               ? Math.round(
@@ -423,7 +910,7 @@ export function DriverMarketView() {
                 )
               : 0}
           </span>
-          . Every transfer is written to the save immediately and applies from the next session.
+          . Every move is written to the save immediately and applies from the next session.
         </p>
       </Panel>
     </div>

@@ -35,6 +35,12 @@ const RndCenterView = lazy(() =>
 const SeasonCalendarView = lazy(() =>
   import('@/views/career/SeasonCalendarView').then((m) => ({ default: m.SeasonCalendarView })),
 );
+const MailView = lazy(() =>
+  import('@/views/career/MailView').then((m) => ({ default: m.MailView })),
+);
+const SocialView = lazy(() =>
+  import('@/views/career/SocialView').then((m) => ({ default: m.SocialView })),
+);
 
 /** Management screens need both the chunk and a loaded save. */
 function Managed({ children }: { children: React.ReactNode }) {
@@ -97,6 +103,18 @@ function ViewRouter({
       return (
         <Managed>
           <SeasonCalendarView onNavigate={onNavigate} />
+        </Managed>
+      );
+    case 'career-mail':
+      return (
+        <Managed>
+          <MailView />
+        </Managed>
+      );
+    case 'career-social':
+      return (
+        <Managed>
+          <SocialView />
         </Managed>
       );
 
