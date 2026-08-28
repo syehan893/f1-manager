@@ -1497,6 +1497,170 @@ console.log('\n== weather: the forecast ==');
   );
 }
 
+/* ---------------------------------------------------------------------
+ * The pit wall's tyre call
+ *
+ * Two bugs lived here. The crew used to fit whatever the *track* said
+ * regardless of what was asked for, so calling for wets in standing
+ * water came back as inters and calling for inters on a drying track
+ * came back as wets — the two wet compounds were impossible to choose
+ * between. And two cars boxing together were both serviced at once, on
+ * one crew, so a double stack was free.
+ * ------------------------------------------------------------------- */
+
+console.log('\n== the pit wall owns the compound ==');
+
+{
+  /** Runs a race in fixed rain, calls a car in on `compound`, reports what
+   *  actually went on the car. */
+  function fittedAfterCall(targetWetness: number, compound: TyreCompound): TyreCompound {
+    const rainEngine = createRaceEngine({
+      circuit: SUZUKA,
+      drivers: DRIVERS,
+      seed: 5150,
+      totalLaps: 30,
+      manualPitDriverIds: ['garcia'],
+      weather: {
+        startWetness: targetWetness,
+        phases: [{ fromLap: 0, kind: 'HEAVY_RAIN', targetWetness }],
+        airTempC: 17,
+        trackTempC: 21,
+        windKph: 14,
+        rainChancePct: 90,
+      },
+    });
+
+    rainEngine.applyCommand({ type: 'SET_TYRE', driverId: 'garcia', compound });
+    rainEngine.applyCommand({ type: 'PIT_CALL', driverId: 'garcia' });
+
+    // Long enough to reach the box, be serviced and rejoin.
+    for (let i = 0; i < 60 * 260; i++) rainEngine.step(16.7);
+    return rainEngine.getState().cars.find((c) => c.driverId === 'garcia')!.tyre.compound;
+  }
+
+  // Standing water: the sane call is full wets, so inters is the gamble.
+  const intersInAFlood = fittedAfterCall(0.85, 'INTER');
+  check(
+    'inters are fitted in standing water when the pit wall asks for them',
+    intersInAFlood === 'INTER',
+    intersInAFlood,
+  );
+
+  // Merely damp: the sane call is inters, so full wets is the gamble.
+  const wetsOnADampTrack = fittedAfterCall(0.3, 'WET');
+  check(
+    'full wets are fitted on a damp track when the pit wall asks for them',
+    wetsOnADampTrack === 'WET',
+    wetsOnADampTrack,
+  );
+
+  // And a slick call in the wet is still the player's to make.
+  const slicksInTheWet = fittedAfterCall(0.7, 'SOFT');
+  check(
+    'a slick call in the wet is honoured too — it is the pit wall\'s race to lose',
+    slicksInTheWet === 'SOFT',
+    slicksInTheWet,
+  );
+
+  /* Nobody called for anything, so a plan left on slicks has to be
+   * overruled — that safety net must survive the fix. */
+  const unattended = createRaceEngine({
+    circuit: SUZUKA,
+    drivers: DRIVERS,
+    seed: 5150,
+    totalLaps: 30,
+    weather: {
+      startWetness: 0.85,
+      phases: [{ fromLap: 0, kind: 'HEAVY_RAIN', targetWetness: 0.85 }],
+      airTempC: 17,
+      trackTempC: 21,
+      windKph: 14,
+      rainChancePct: 90,
+    },
+  });
+  for (let i = 0; i < 60 * 200; i++) unattended.step(16.7);
+  const onWets = unattended
+    .getState()
+    .cars.filter((c) => c.tyre.compound === 'INTER' || c.tyre.compound === 'WET').length;
+  check(
+    'a car nobody is calling for still gets the tyre the track needs',
+    onWets >= 18,
+    `${onWets}/20 on wets`,
+  );
+}
+
+console.log('\n== one crew, one box ==');
+
+{
+  /* Two team-mates called in on the same lap on different compounds.
+   * Each has to end up on what was actually asked for, and the second
+   * one has to wait for the crew — which is what a double stack costs,
+   * and what used to be free because both cars were serviced at once. */
+  /* Team-mates who line up next to each other, so both reach the pit
+   * entry on the same lap a fraction of a second apart — which is the
+   * only situation a stack actually arises in. Two cars a lap apart do
+   * not stack, and should not. */
+  const pairIndex = DRIVERS.findIndex(
+    (driver, index) => index > 0 && DRIVERS[index - 1]!.teamId === driver.teamId,
+  );
+  const first = DRIVERS[pairIndex - 1]!;
+  const second = DRIVERS[pairIndex]!;
+
+  /** Boxes `second` immediately, optionally stacking them behind `first`. */
+  function stackRun(behindMate: boolean) {
+    const stackEngine = createRaceEngine({
+      circuit: SUZUKA,
+      drivers: DRIVERS,
+      seed: 90210,
+      totalLaps: 30,
+      manualPitDriverIds: [first.id, second.id],
+    });
+
+    stackEngine.applyCommand({ type: 'SET_TYRE', driverId: first.id, compound: 'SOFT' });
+    stackEngine.applyCommand({ type: 'SET_TYRE', driverId: second.id, compound: 'HARD' });
+    // The team-mate goes first, so the box is occupied when the second
+    // car arrives — the order the commands land in is the order they box.
+    if (behindMate) stackEngine.applyCommand({ type: 'PIT_CALL', driverId: first.id });
+    stackEngine.applyCommand({ type: 'PIT_CALL', driverId: second.id });
+
+    let stationaryTicks = 0;
+    for (let i = 0; i < 60 * 300; i++) {
+      stackEngine.step(16.7);
+      const car = stackEngine.getState().cars.find((c) => c.driverId === second.id)!;
+      if (car.status === 'IN_PIT') stationaryTicks++;
+    }
+
+    const cars = stackEngine.getState().cars;
+    return {
+      firstTyre: cars.find((c) => c.driverId === first.id)!.tyre.compound,
+      secondTyre: cars.find((c) => c.driverId === second.id)!.tyre.compound,
+      secondStops: cars.find((c) => c.driverId === second.id)!.pitStops,
+      secondStationaryMs: stationaryTicks * 16.7,
+    };
+  }
+
+  const stacked = stackRun(true);
+  const alone = stackRun(false);
+
+  check(
+    'both cars boxing together get their own compound',
+    stacked.firstTyre === 'SOFT' && stacked.secondTyre === 'HARD',
+    `${stacked.firstTyre} / ${stacked.secondTyre}`,
+  );
+  check(
+    'a stacked car is still served',
+    stacked.secondStops >= 1 && alone.secondStops >= 1,
+    `${stacked.secondStops} stacked, ${alone.secondStops} alone`,
+  );
+  check(
+    'stacking behind the team-mate costs real time',
+    stacked.secondStationaryMs > alone.secondStationaryMs + 500,
+    `${(stacked.secondStationaryMs / 1000).toFixed(1)}s stationary stacked vs ${(
+      alone.secondStationaryMs / 1000
+    ).toFixed(1)}s alone`,
+  );
+}
+
 console.log(
   failures === 0
     ? '\nAll simulation checks passed.\n'
