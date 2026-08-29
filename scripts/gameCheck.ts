@@ -2184,7 +2184,15 @@ console.log('\n== a car assembled from parts ==');
     !transition(fittedNow, { type: 'FIT_PART', partId: spare.id }).ok,
   );
   check(
-    'scrapping the fitted part is refused',
+    'scrapping the part that is on the car is refused',
+    !transition(fittedNow, { type: 'SCRAP_PART', partId: spare.id }).ok,
+  );
+  check(
+    'but a spare can be scrapped',
+    transition(fittedNow, { type: 'SCRAP_PART', partId: oldFloor.id }).ok,
+  );
+  check(
+    'a part that does not exist is refused',
     !transition(fittedNow, { type: 'FIT_PART', partId: 'nonsense' }).ok,
   );
 }
