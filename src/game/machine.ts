@@ -6,13 +6,19 @@ import {
   ENGINE_ALLOCATION,
   ENGINE_WEAR_PER_RACE_LAP,
   PART_BY_ID,
+  buildFullSet,
+  buildPart,
   buildPowerUnit,
+  buildsRemaining,
   enginePenaltyPlaces,
+  fittedPart,
   fittedUnit,
+  partBuildCost,
   powerUnitCost,
   refreshCar,
   seedParts,
   unitSpecRating,
+  wearFittedParts,
 } from './carModel';
 import {
   PART_AREA,
@@ -119,6 +125,7 @@ import {
 import { SAVE_VERSION } from './types';
 import type { ComponentVariant } from '@/types/career';
 import type {
+  BuiltPart,
   DriverRole,
   GameEvent,
   GameEventType,
@@ -202,6 +209,9 @@ const MANAGEMENT_ACTIONS: GameEventType[] = [
   'CANCEL_PART_DEVELOPMENT',
   'BUILD_POWER_UNIT',
   'FIT_POWER_UNIT',
+  'BUILD_PART',
+  'FIT_PART',
+  'SCRAP_PART',
   'SET_PHILOSOPHY',
   'START_UPGRADE',
   'CANCEL_UPGRADE',
@@ -328,13 +338,24 @@ export function createNewGame(managerName = 'New Manager'): GameState {
       parts,
       powerUnits: [first],
       fittedPowerUnitId: first.id,
+      /* Seeded for every team below, so wear is the same rule for the
+       * whole grid: a rival's car fades between rebuilds exactly as the
+       * player's does, and a team that cannot afford to replace a worn
+       * part races it worn. */
+      builtParts: [] as BuiltPart[],
       development: [],
       philosophy: 'BALANCED' as const,
     };
   });
 
-  // Fold the seeded parts back into the cached statistics.
-  for (const team of teams) refreshCar(team);
+  /* Roll every team out on a full set of fresh parts built to its own
+   * drawings, then fold the result back into the cached statistics. A
+   * fresh part is worth exactly its spec, so the grid opens on precisely
+   * the numbers the data file publishes. */
+  for (const team of teams) {
+    team.builtParts = buildFullSet(team, 2026);
+    refreshCar(team);
+  }
 
   return {
     version: SAVE_VERSION,
@@ -570,6 +591,7 @@ function clone(state: GameState): GameState {
       car: { ...team.car },
       parts: team.parts.map((part) => ({ ...part })),
       powerUnits: team.powerUnits.map((unit) => ({ ...unit, spec: { ...unit.spec } })),
+      builtParts: (team.builtParts ?? []).map((part) => ({ ...part })),
       development: team.development.map((project) => ({ ...project })),
     })),
     driverTeams: { ...state.driverTeams },
@@ -726,6 +748,17 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
     case 'CONFIRM_TEAM': {
       if (!next.pendingTeamId) return refuse('Select a team before continuing.');
       next.playerTeamId = next.pendingTeamId;
+
+      /* Every team was rolled out on a full set when the career was
+       * created, so there is nothing to stock here — but a save made
+       * before parts were objects has an empty garage, and opening a
+       * career with a car assembled from nothing is not a thing to
+       * discover on a Sunday. */
+      const team = next.teams.find((entry) => entry.teamId === next.playerTeamId);
+      if (team && (team.builtParts ?? []).length === 0) {
+        team.builtParts = buildFullSet(team, next.season);
+        refreshCar(team);
+      }
       break;
     }
 
@@ -839,6 +872,75 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
       unit.status = 'FITTED';
       team.fittedPowerUnitId = unit.id;
       refreshCar(team);
+      break;
+    }
+
+    case 'BUILD_PART': {
+      const team = next.teams.find((t) => t.teamId === next.playerTeamId);
+      if (!team) return refuse('No team selected.');
+
+      const definition = PART_BY_ID.get(event.category);
+      if (!definition) return refuse('No such part.');
+
+      /* The allowance is the regulator's, and it is a cap rather than a
+       * gate: a part built beyond it is still legal, it just costs half
+       * as much again to make in a hurry. */
+      const remaining = buildsRemaining(team, event.category, next.season);
+      const cost = partBuildCost(team, event.category, next.season);
+      if (team.budget < cost) {
+        return refuse(
+          `A new ${definition.label.toLowerCase()} costs ${formatMillions(cost)}; you have ${formatMillions(team.budget)}.`,
+        );
+      }
+
+      const serial = (team.builtParts ?? []).filter(
+        (part) => part.category === event.category,
+      ).length;
+      const made = buildPart(team, event.category, next.season, serial);
+      team.builtParts = [...(team.builtParts ?? []), made];
+
+      post(
+        next,
+        'UPGRADE',
+        `${definition.label} built${remaining === 0 ? ' (outside the allowance)' : ''}`,
+        -cost,
+      );
+
+      /* Nothing on the car changes until it is fitted — that is the third
+       * step of the loop and the player's call. */
+      break;
+    }
+
+    case 'FIT_PART': {
+      const team = next.teams.find((t) => t.teamId === next.playerTeamId);
+      if (!team) return refuse('No team selected.');
+
+      const part = (team.builtParts ?? []).find((entry) => entry.id === event.partId);
+      if (!part) return refuse('No such part in the garage.');
+      if (part.status === 'FITTED') return refuse('That part is already on the car.');
+      if (part.status === 'RETIRED') return refuse('That part is finished — build a new one.');
+
+      /* Whatever was on the car comes off and goes back on the shelf,
+       * unless it is worn out, in which case it is scrap. */
+      const current = fittedPart(team, part.category);
+      if (current) current.status = current.healthPct <= 0 ? 'RETIRED' : 'POOL';
+
+      part.status = 'FITTED';
+      refreshCar(team);
+      break;
+    }
+
+    case 'SCRAP_PART': {
+      const team = next.teams.find((t) => t.teamId === next.playerTeamId);
+      if (!team) return refuse('No team selected.');
+
+      const part = (team.builtParts ?? []).find((entry) => entry.id === event.partId);
+      if (!part) return refuse('No such part in the garage.');
+      if (part.status === 'FITTED') {
+        return refuse('That one is on the car. Fit something else first.');
+      }
+
+      team.builtParts = (team.builtParts ?? []).filter((entry) => entry.id !== event.partId);
       break;
     }
 
@@ -1892,6 +1994,31 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         unit.healthPct = Math.max(0, Math.round((unit.healthPct - wear) * 10) / 10);
         if (unit.healthPct <= 0) unit.status = 'RETIRED';
 
+        /* And the rest of the car with it. Only the player keeps an
+         * inventory, so this is a no-op for the AI, which is abstracted
+         * above the level parts live at. */
+        const worn = wearFittedParts(team, event.result.totalLaps, next.settings.raceLengthPct);
+
+        /* A part that has reached the end is still on the car — a team
+         * does not race without a floor — but it is giving back the
+         * least it ever will, and the player is told so plainly. */
+        if (worn.length > 0 && team.teamId === next.playerTeamId) {
+          postMail(next, {
+            category: 'RND',
+            from: 'Chief Mechanic',
+            subject: `${worn.length} part${worn.length === 1 ? '' : 's'} at the end of life`,
+            importance: 'HIGH',
+            body:
+              worn
+                .map(
+                  (part) =>
+                    `• ${PART_BY_ID.get(part.category)?.label ?? part.category} — ${Math.round(part.mileageLaps)} laps, finished.`,
+                )
+                .join('\n') +
+              `\n\nThey will keep running, but they are giving back the least they ever will. Build replacements in the garage — they will be made to whatever the drawings say now, so anything R&D has landed since goes straight onto the car.`,
+          });
+        }
+
         refreshCar(team);
       }
 
@@ -2089,9 +2216,46 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
           next.driverTeams,
           next.teams.map((team) => team.teamId),
         );
-        // New regulations year: the development cap resets.
+        /* New regulations year: the cap resets, and so does the pool it
+         * governs. The cap alone used to reset, which read as though a
+         * fresh allocation had arrived while the pool it is spent from
+         * stayed empty — so from the second season the whole tech tree
+         * was permanently unaffordable and the R&D Center simply stopped
+         * working. The pool is what the cap is a limit on; both move. */
         next.rnd.seasonalCapTokens = SEASONAL_CAP_TOKENS;
         next.rnd.seasonalTokensUsed = 0;
+        next.rnd.developmentTokens = Math.min(
+          next.rnd.developmentTokens + SEASONAL_CAP_TOKENS,
+          SEASONAL_CAP_TOKENS * 2,
+        );
+
+        /* ---- the new car ------------------------------------------- *
+         * A season's engines and parts do not carry over. Without this
+         * the pool grew by every unit ever built and the garage filled
+         * with the spares of seasons nobody remembers. Each team keeps
+         * exactly one power unit and one of each part — freshly built to
+         * the drawings as they stand after the winter, which is where
+         * the off-season's development actually shows up. */
+        for (const team of next.teams) {
+          const winter = buildPowerUnit(team.parts, next.season, 0);
+          winter.status = 'FITTED';
+          team.powerUnits = [winter];
+          team.fittedPowerUnitId = winter.id;
+
+          team.builtParts = buildFullSet(team, next.season);
+          refreshCar(team);
+        }
+        next.pendingGridPenalty = 0;
+
+        if (next.playerTeamId) {
+          postMail(next, {
+            category: 'RND',
+            from: 'Technical Director',
+            subject: `The ${next.season} car is built`,
+            importance: 'NORMAL',
+            body: `Winter is done. A fresh power unit and a full set of parts have been made to the current drawings, all fitted, and last year's stock has been written off.\n\nThe development allowance has been reissued for the new regulations year — ${next.rnd.developmentTokens} tokens in the pool against a ${SEASONAL_CAP_TOKENS}-token seasonal cap.`,
+          });
+        }
         next.finance.seasonIncome = 0;
         next.finance.seasonExpenditure = 0;
 

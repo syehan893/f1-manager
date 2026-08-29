@@ -1,7 +1,14 @@
 /* Headless assertions for the career-game state machine.
  * Run with:  npm run game:check */
 
-import { createNewGame, transition, PHASE_TRANSITIONS, canDispatch } from '../src/game/machine';
+import {
+  COMPONENT_CATALOG,
+  PHASE_TRANSITIONS,
+  canDispatch,
+  canStartUpgrade,
+  createNewGame,
+  transition,
+} from '../src/game/machine';
 import { simulateQualifying, QUALIFYING_LAPS } from '../src/game/qualifying';
 import { POINTS_TABLE, applyRaceResult, pointsForPosition, scoreRace } from '../src/game/championship';
 import { evaluateApplication, jobOpenings } from '../src/game/jobMarket';
@@ -11,7 +18,18 @@ import { driverValuation, quoteTransfer } from '../src/game/finance';
 import { seasonScore } from '../src/game/transferMarket';
 import { profileFor } from '../src/game/difficulty';
 import { blankStrategy } from '../src/game/machine';
-import { PARTS, enginePenaltyPlaces, fittedUnit } from '../src/game/carModel';
+import {
+  ASSEMBLY_PARTS,
+  PARTS,
+  PART_BY_ID,
+  buildsRemaining,
+  enginePenaltyPlaces,
+  fittedPart,
+  fittedUnit,
+  partBuildCost,
+  partHealthFactor,
+  sparePartsOf,
+} from '../src/game/carModel';
 import { developmentGain, partLevel } from '../src/game/partDevelopment';
 import { ATTRIBUTE_KEYS, currentRating, driverAdaptationPenalty, driverFeedbackBonus, effectiveDriver, potentialOf, prospectToDriver, scoutedRange } from '../src/game/driverDevelopment';
 import { blankCondition, conditionEffects, emotionOf } from '../src/game/driverCondition';
@@ -155,11 +173,49 @@ check(
   partLevel(landed, 'FLOOR') > floorBefore,
   `floor ${floorBefore.toFixed(1)} -> ${partLevel(landed, 'FLOOR').toFixed(1)}`,
 );
+/* A landed programme moves the *drawing*, not the car. The car only
+ * changes when something built to the new drawing is bolted on — that
+ * is the whole point of splitting R&D from the garage, and it is what
+ * this pair of assertions pins down. */
 check(
-  'the statistics follow the parts',
-  landed.car.aero > aeroBefore,
+  'a landed programme does not move the car on its own',
+  Math.abs(landed.car.aero - aeroBefore) < 0.01,
   `aero ${aeroBefore.toFixed(1)} -> ${landed.car.aero.toFixed(1)}`,
 );
+
+{
+  const rich: GameState = {
+    ...landing,
+    teams: landing.teams.map((t) => ({ ...t, budget: 400_000_000 })),
+  };
+  const madeIt = must(rich, { type: 'BUILD_PART', category: 'FLOOR' }, 'build a floor');
+  const team = madeIt.teams.find((t) => t.teamId === 'williams')!;
+
+  check(
+    'building does not move the car either',
+    Math.abs(team.car.aero - aeroBefore) < 0.01,
+    `aero still ${team.car.aero.toFixed(1)}`,
+  );
+
+  const spare = sparePartsOf(team, 'FLOOR')[0]!;
+  check(
+    'the part is built to the drawing as it stands',
+    Math.abs(spare.spec - partLevel(team, 'FLOOR')) < 0.01,
+    `spec ${spare.spec.toFixed(1)} vs drawing ${partLevel(team, 'FLOOR').toFixed(1)}`,
+  );
+
+  const bolted = must(madeIt, { type: 'FIT_PART', partId: spare.id }, 'fit the floor');
+  const after = bolted.teams.find((t) => t.teamId === 'williams')!;
+  check(
+    'fitting it is what moves the statistics',
+    after.car.aero > aeroBefore,
+    `aero ${aeroBefore.toFixed(1)} -> ${after.car.aero.toFixed(1)}`,
+  );
+  check(
+    'and what came off went back on the shelf',
+    sparePartsOf(after, 'FLOOR').length === 1,
+  );
+}
 
 console.log('\n== power units ==');
 
@@ -2042,6 +2098,228 @@ console.log('\n== the inbox ==');
 
   const mailIds = new Set(g.mail.map((m) => m.id));
   check('no two messages share an id', mailIds.size === g.mail.length);
+}
+
+/* ---------------------------------------------------------------------
+ * The garage: R&D raises a drawing, the factory builds to it, the
+ * mechanics fit it, and the part wears until it has to be built again.
+ * ------------------------------------------------------------------- */
+
+console.log('\n== a car assembled from parts ==');
+
+{
+  let g = createNewGame('Garage');
+  g = must(g, { type: 'SET_MANAGER_NAME', name: 'Garage' }, 'name');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'confirm');
+  g = { ...g, teams: g.teams.map((t) => ({ ...t, budget: 400_000_000 })) };
+
+  const team = (s2: GameState) => s2.teams.find((t) => t.teamId === 'williams')!;
+
+  check(
+    'the garage opens with a full set fitted',
+    team(g).builtParts.filter((p) => p.status === 'FITTED').length === ASSEMBLY_PARTS.length,
+    `${team(g).builtParts.length} parts`,
+  );
+  check(
+    'every category can be built',
+    ASSEMBLY_PARTS.every((c) => transition(g, { type: 'BUILD_PART', category: c }).ok),
+    `${ASSEMBLY_PARTS.length} categories`,
+  );
+
+  /* Cost has to answer to the drawing: a better part is a dearer one. */
+  const cheap = partBuildCost(team(g), 'FRONT_WING', g.season);
+  const dear = partBuildCost(
+    { ...team(g), parts: team(g).parts.map((p) => ({ ...p, level: 97 })) },
+    'FRONT_WING',
+    g.season,
+  );
+  check('a higher-spec part costs more to build', dear > cheap * 1.5, `${(cheap / 1e6).toFixed(2)}M vs ${(dear / 1e6).toFixed(2)}M`);
+
+  /* The allowance is a cap that charges, not a wall that stops. */
+  let spent = g;
+  const allowance = PART_BY_ID.get('BRAKES')!.buildAllowance;
+  for (let i = 0; i < allowance; i++) {
+    spent = must(spent, { type: 'BUILD_PART', category: 'BRAKES' }, `brake set ${i + 1}`);
+  }
+  check(
+    'the seasonal allowance is spent by building',
+    buildsRemaining(team(spent), 'BRAKES', spent.season) === 0,
+    `${allowance} used`,
+  );
+  const withinCost = partBuildCost(team(g), 'BRAKES', g.season);
+  const rushedCost = partBuildCost(team(spent), 'BRAKES', spent.season);
+  check('going beyond it costs more', rushedCost > withinCost, `${(withinCost / 1e6).toFixed(2)}M -> ${(rushedCost / 1e6).toFixed(2)}M`);
+  check(
+    'but is still allowed',
+    transition(spent, { type: 'BUILD_PART', category: 'BRAKES' }).ok,
+  );
+
+  /* No money, no part. */
+  const broke: GameState = {
+    ...g,
+    teams: g.teams.map((t) => (t.teamId === 'williams' ? { ...t, budget: 1_000 } : t)),
+  };
+  const refused = transition(broke, { type: 'BUILD_PART', category: 'CHASSIS' });
+  check('a build you cannot afford is refused', !refused.ok, refused.message ?? '');
+
+  /* Fitting swaps, it does not duplicate. */
+  const made = must(g, { type: 'BUILD_PART', category: 'FLOOR' }, 'a floor');
+  const spare = sparePartsOf(team(made), 'FLOOR')[0]!;
+  const oldFloor = fittedPart(team(made), 'FLOOR')!;
+  const fittedNow = must(made, { type: 'FIT_PART', partId: spare.id }, 'fit it');
+  check(
+    'exactly one part of a category is ever fitted',
+    team(fittedNow).builtParts.filter((p) => p.category === 'FLOOR' && p.status === 'FITTED')
+      .length === 1,
+  );
+  check('the new one is on the car', fittedPart(team(fittedNow), 'FLOOR')!.id === spare.id);
+  check(
+    'the old one is a spare, not scrap',
+    sparePartsOf(team(fittedNow), 'FLOOR').some((p) => p.id === oldFloor.id),
+  );
+  check(
+    'refitting what is already on the car is refused',
+    !transition(fittedNow, { type: 'FIT_PART', partId: spare.id }).ok,
+  );
+  check(
+    'scrapping the fitted part is refused',
+    !transition(fittedNow, { type: 'FIT_PART', partId: 'nonsense' }).ok,
+  );
+}
+
+console.log('\n== parts wear out ==');
+
+{
+  let g = createNewGame('Wear');
+  g = must(g, { type: 'SET_SETTINGS', settings: { seasonLength: 8 } }, 'settings');
+  g = must(g, { type: 'SET_MANAGER_NAME', name: 'Wear' }, 'name');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'confirm');
+  g = must(g, { type: 'START_SEASON' }, 'start');
+
+  const team = (s2: GameState) => s2.teams.find((t) => t.teamId === 'williams')!;
+  const track = buildTracks(8)[0]!;
+  const order = Object.keys(g.driverTeams);
+
+  const aeroFresh = team(g).car.aero;
+  const brakesFresh = fittedPart(team(g), 'BRAKES')!.healthPct;
+
+  /* Four weekends is more than a set of brakes lasts and less than a
+   * chassis does — which is exactly the spread the system is for. */
+  for (let round = 0; round < 4; round++) {
+    const result = scoreRace({
+      season: g.season, round: g.round, trackId: track.id, totalLaps: 20, order,
+      driverTeams: g.driverTeams,
+      gridPositions: Object.fromEntries(order.map((id, i) => [id, i + 1])),
+      bestLaps: Object.fromEntries(order.map((id) => [id, 80_000])),
+      retired: new Set<string>(),
+      gaps: Object.fromEntries(order.map((id, i) => [id, i * 900])),
+      fastestLapPoint: true,
+    });
+    g = must({ ...g, phase: 'RACE_SESSION' }, { type: 'RACE_COMPLETE', result }, `race ${round + 1}`);
+    g = must(g, { type: 'CONTINUE_TO_NEXT_WEEK' }, `week ${round + 1}`);
+  }
+
+  const brakes = fittedPart(team(g), 'BRAKES')!;
+  const chassis = fittedPart(team(g), 'CHASSIS')!;
+  check('a consumable part wears fast', brakes.healthPct < brakesFresh - 60, `brakes ${brakes.healthPct}%`);
+  check('a long-life part wears slowly', chassis.healthPct > 55, `chassis ${chassis.healthPct}%`);
+  check('mileage is recorded', brakes.mileageLaps >= 80, `${brakes.mileageLaps} laps`);
+  check(
+    'wear costs the car real performance',
+    team(g).car.aero < aeroFresh,
+    `aero ${aeroFresh.toFixed(1)} -> ${team(g).car.aero.toFixed(1)}`,
+  );
+  check(
+    'a worn part is never worth more than a fresh one',
+    partHealthFactor(0) < partHealthFactor(100) && partHealthFactor(100) === 1,
+  );
+
+  /* Building and fitting a fresh one is the cure, and it has to be. */
+  const rich: GameState = { ...g, teams: g.teams.map((t) => ({ ...t, budget: 400_000_000 })) };
+  const rebuilt = must(rich, { type: 'BUILD_PART', category: 'FRONT_WING' }, 'fresh wing');
+  const fresh = sparePartsOf(team(rebuilt), 'FRONT_WING')[0]!;
+  const fittedFresh = must(rebuilt, { type: 'FIT_PART', partId: fresh.id }, 'fit fresh wing');
+  check(
+    'a rebuild recovers what wear took',
+    fittedFresh.teams.find((t) => t.teamId === 'williams')!.car.aero > team(g).car.aero,
+  );
+}
+
+console.log('\n== a new season resets the car ==');
+
+{
+  let g = createNewGame('Rollover');
+  g = must(g, { type: 'SET_SETTINGS', settings: { seasonLength: 4 } }, 'settings');
+  g = must(g, { type: 'SET_MANAGER_NAME', name: 'Rollover' }, 'name');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'confirm');
+  g = { ...g, teams: g.teams.map((t) => ({ ...t, budget: 400_000_000 })) };
+  g = must(g, { type: 'START_SEASON' }, 'start');
+
+  const team = (s2: GameState) => s2.teams.find((t) => t.teamId === 'williams')!;
+
+  // Pile up engines and spares the way a season does.
+  for (let i = 0; i < 5; i++) g = must(g, { type: 'BUILD_POWER_UNIT' }, `unit ${i + 1}`);
+  for (let i = 0; i < 3; i++) g = must(g, { type: 'BUILD_PART', category: 'FRONT_WING' }, `wing ${i + 1}`);
+  check('units pile up during a season', team(g).powerUnits.length === 6, `${team(g).powerUnits.length}`);
+  check('so do spares', sparePartsOf(team(g), 'FRONT_WING').length === 3);
+
+  // Spend the token pool down, as a season of upgrades would.
+  g = { ...g, rnd: { ...g.rnd, developmentTokens: 3, seasonalTokensUsed: 45 } };
+
+  const season = g.season;
+  for (let round = 0; round < 4; round++) {
+    g = must({ ...g, phase: 'POST_RACE' }, { type: 'CONTINUE_TO_NEXT_WEEK' }, `round ${round + 1}`);
+  }
+
+  check('the season rolled over', g.season === season + 1, `${season} -> ${g.season}`);
+  check(
+    'exactly one power unit survives the winter',
+    team(g).powerUnits.length === 1,
+    `${team(g).powerUnits.length} left`,
+  );
+  check('and it is fresh and in the car', fittedUnit(team(g))?.healthPct === 100);
+  check(
+    "the garage is a fresh full set, not last year's stock",
+    team(g).builtParts.length === ASSEMBLY_PARTS.length &&
+      team(g).builtParts.every((p) => p.status === 'FITTED' && p.healthPct === 100),
+    `${team(g).builtParts.length} parts`,
+  );
+  check(
+    'build allowances reset with the season',
+    ASSEMBLY_PARTS.every((c) => buildsRemaining(team(g), c, g.season) > 0),
+  );
+  check('any pending grid penalty is cleared', g.pendingGridPenalty === 0);
+
+  /* The bug: the seasonal cap reset but the pool it is spent from did
+   * not, so from season two the whole tech tree was unaffordable and
+   * the R&D Center was, in effect, switched off. */
+  check(
+    'the development pool is reissued for the new year',
+    g.rnd.developmentTokens > 3,
+    `3 -> ${g.rnd.developmentTokens}`,
+  );
+  check('and the seasonal cap resets with it', g.rnd.seasonalTokensUsed === 0);
+
+  const startable = COMPONENT_CATALOG.flatMap((c) => c.variants).filter(
+    (v) => canStartUpgrade(v, g).ok,
+  );
+  check(
+    'so upgrades can actually be commissioned in season two',
+    startable.length > 0,
+    `${startable.length} available`,
+  );
+
+  // And part development is still open too.
+  check(
+    'part development is still open in season two',
+    transition(g, { type: 'DEVELOP_PART', category: 'FLOOR', intensity: 2 }).ok,
+  );
 }
 
 console.log(failures === 0 ? '\nAll game-flow checks passed.\n' : `\n${failures} check(s) FAILED.\n`);

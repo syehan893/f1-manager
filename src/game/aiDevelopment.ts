@@ -1,11 +1,17 @@
 import { GRID_2026_TEAMS } from '@/data/grid2026';
 import { profileFor } from './difficulty';
 import {
+  ASSEMBLY_PARTS,
   ENGINE_ALLOCATION,
+  buildPart,
   buildPowerUnit,
+  fittedPart,
   fittedUnit,
+  partBuildCost,
   powerUnitCost,
   refreshCar,
+  sparePartsOf,
+  syncPartsToDrawings,
 } from './carModel';
 import {
   DEVELOPMENT_INTENSITY,
@@ -145,6 +151,13 @@ function developmentBudget(state: GameState, team: TeamSeasonState): number {
   return Math.min(team.budget * 0.35, team.budget * 0.14 * appetite * urgency);
 }
 
+/**
+ * Health at which a rival replaces a part. Below the trigger a careful
+ * player would use, because the AI acts once a round and has to leave
+ * itself room rather than reacting the moment something dips.
+ */
+const AI_REBUILD_THRESHOLD = 30;
+
 export interface AiDevelopmentNote {
   teamId: string;
   category: PartCategory;
@@ -165,9 +178,50 @@ export function developAiCars(state: GameState, weeksElapsed = 2): AiDevelopment
   for (const team of state.teams) {
     if (team.teamId === state.playerTeamId) continue;
 
-    // Whatever finished during the week goes onto the car.
+    /* Whatever finished during the week goes onto the car. For a rival
+     * that means the new drawing is on the car too: they are modelled as
+     * always rebuilding at the first opportunity, so development reaches
+     * their car the way it reaches the player's once they have been to
+     * the garage. */
     const landed = advanceDevelopment(team, weeksElapsed);
-    if (landed.length > 0) refreshCar(team);
+    const synced = syncPartsToDrawings(team);
+    if (landed.length > 0 || synced) refreshCar(team);
+
+    /* Maintenance, which is not development: a rival replaces a part
+     * that has gone, out of its own budget and to its own current
+     * drawings — the same three steps the player takes, run
+     * automatically because the AI is abstracted above the garage rather
+     * than exempt from it. This happens at every difficulty, including
+     * the ones where rivals do no development at all, because a team
+     * that never bolts a new wing on is not an easy opponent, it is a
+     * broken one.
+     *
+     * A team that cannot afford the replacement races the worn part,
+     * which is how a well-run budget turns into lap time. */
+    let replaced = false;
+    for (const category of ASSEMBLY_PARTS) {
+      const fitted = fittedPart(team, category);
+      if (!fitted || fitted.healthPct > AI_REBUILD_THRESHOLD) continue;
+
+      const spare = sparePartsOf(team, category)[0];
+      if (spare && spare.healthPct > fitted.healthPct + 20) {
+        fitted.status = fitted.healthPct <= 0 ? 'RETIRED' : 'POOL';
+        spare.status = 'FITTED';
+        replaced = true;
+        continue;
+      }
+
+      const cost = partBuildCost(team, category, state.season);
+      if (team.budget < cost * 2) continue;
+
+      const fresh = buildPart(team, category, state.season, team.builtParts.length);
+      team.budget -= cost;
+      fitted.status = fitted.healthPct <= 0 ? 'RETIRED' : 'POOL';
+      fresh.status = 'FITTED';
+      team.builtParts = [...team.builtParts, fresh];
+      replaced = true;
+    }
+    if (replaced) refreshCar(team);
 
     if (profile.aiDevelopmentPerRound <= 0) continue;
 
@@ -326,6 +380,10 @@ export function developAiPreSeason(state: GameState): AiDevelopmentNote[] {
     ].slice(-ENGINE_ALLOCATION * 2);
     team.fittedPowerUnitId = fresh.id;
 
+    /* The winter's work has to be on the car, not merely on the drawing.
+     * The machine already rolls every team out on a fresh full set at
+     * the new year; this catches development that lands after it. */
+    syncPartsToDrawings(team);
     refreshCar(team);
   }
 

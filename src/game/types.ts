@@ -223,6 +223,25 @@ export interface PartState {
   variantId: string | null;
 }
 
+/**
+ * A physical part, made to a drawing and wearing out from there.
+ *
+ * `PartState.level` is the design; this is one object built to it. The
+ * spec is frozen at the moment of the build, so later development
+ * improves the next part rather than the one already on the car.
+ */
+export interface BuiltPart {
+  id: string;
+  category: PartCategory;
+  builtInSeason: number;
+  /** The drawing level it was made to. Never changes after the build. */
+  spec: number;
+  mileageLaps: number;
+  /** 100 fresh, 0 finished. */
+  healthPct: number;
+  status: 'FITTED' | 'POOL' | 'RETIRED';
+}
+
 /** A physical power unit: a spec, and mileage on it. */
 export interface PowerUnitState {
   id: string;
@@ -267,6 +286,12 @@ export interface TeamSeasonState {
   parts: PartState[];
   powerUnits: PowerUnitState[];
   fittedPowerUnitId: string | null;
+  /**
+   * Physical parts this team has made, fitted and spare. Empty for the
+   * AI, which is abstracted above this: a team with no inventory reads
+   * its drawings directly, exactly as every team used to.
+   */
+  builtParts: BuiltPart[];
   development: DevelopmentProject[];
   philosophy: DevelopmentPhilosophy;
 }
@@ -574,7 +599,7 @@ export interface RoundRecord {
   pointsScored: number;
 }
 
-export const SAVE_VERSION = 13;
+export const SAVE_VERSION = 14;
 
 export interface GameState {
   /** Bumped when the shape changes; older saves are discarded on load. */
@@ -684,6 +709,10 @@ export type GameEvent =
   | { type: 'CANCEL_PART_DEVELOPMENT'; projectId: string }
   | { type: 'BUILD_POWER_UNIT' }
   | { type: 'FIT_POWER_UNIT'; unitId: string }
+  /* ---- the garage: build a part, then bolt it on ---- */
+  | { type: 'BUILD_PART'; category: PartCategory }
+  | { type: 'FIT_PART'; partId: string }
+  | { type: 'SCRAP_PART'; partId: string }
   | { type: 'SET_PHILOSOPHY'; philosophy: DevelopmentPhilosophy }
   | { type: 'START_UPGRADE'; variantId: string }
   | { type: 'CANCEL_UPGRADE'; variantId: string }
