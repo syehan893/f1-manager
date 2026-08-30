@@ -416,6 +416,90 @@ The calendar remains editable only in `PRE_SEASON`.
 
 ---
 
+## Sound
+
+Every sound is synthesised in the browser from oscillators and filtered
+noise. Nothing is loaded, because the project ships no audio files: a
+recorded engine is a licensing question and several megabytes on a static
+deployment, and neither belongs in a management sim where sound is
+punctuation rather than the point.
+
+What that buys besides the download is that the engine note is a real
+function of revs — it follows the leader's pace around a lap instead of
+looping a sample — and the whole thing is one file with no assets to keep
+in step. `src/lib/audio.ts` holds the synthesis; `useSound`,
+`useSoundPrefs` and `useRaceSound` are React's side of it.
+
+Browsers refuse to start audio before a gesture, so the context is
+created on the first pointer or key event anywhere in the app and every
+call before that is a silent no-op rather than an error. Volume and mute
+live in `localStorage` and are reachable from the top bar on every screen
+as well as from Settings.
+
+## How a car gets built
+
+A development level and a part are two different things, and separating
+them is what makes the car something you assemble rather than a slider
+you drag.
+
+`PartState.level` is the **drawing**: what the drawing office has reached,
+and the only thing R&D moves. `BuiltPart` is one **object** made to that
+drawing, its spec frozen at the moment of the build. The car is assembled
+from what is bolted on, never from the drawing — so developing the floor
+next month improves the next floor, not the one on the car.
+
+**Two cars, one drawing office.** A part belongs to a car, not to a
+driver: each of a team's two cars carries its own set and has its own
+statistics, while the drawings are shared. One driver, one car — car 1 is
+the first name in the line-up — so promoting a reserve changes who drives
+a car and never which parts are on it. The build allowance is the team's,
+which is what makes *which car gets the next one* the decision, and
+spares are shared so a wing built for one can be bolted to the other.
+
+The two cars come apart on their own, because wear is set by whoever is
+driving. `driverWearFactor` reads mechanical sympathy (tyre management
+and consistency), aggression (attack), the push level the pit wall handed
+down, and how wound up the driver is — roughly 0.7x to 1.4x. Three rounds
+in, the same brake set can be at 12% on one side of the garage and 32% on
+the other, and qualifying and race pace read the car the driver is
+actually in rather than the constructor's average.
+
+That gives three steps, on two screens:
+
+1. **R&D Center** — commission a programme on a part. Weeks later the
+   drawing moves up. The car does not change.
+2. **Car Dev (the garage)** — the factory builds one part to that
+   drawing. The car still does not change.
+3. **Car Dev** — fit it. Whatever comes off goes back on the shelf, or in
+   the bin if it was finished, and the statistics move.
+
+Parts wear out. A front wing is gone in three weekends and a chassis
+lasts a season, so the car has to be rebuilt through the year — and every
+rebuild is a chance to put whatever R&D has landed since onto the car.
+Wear is spent per weekend rather than per lap, so a 25% season still has
+a build plan in it; distance shifts the rate a little, not everything. A
+finished part keeps running at 82% of its spec rather than leaving a hole
+in the car.
+
+Each category has a seasonal **build allowance** and a cost that climbs
+steeply with spec — a 95 floor is a different object from a 70 floor, not
+a slightly better one. Going past an allowance is legal and costs half as
+much again; the budget is the real limit.
+
+Rivals are held to the same rules rather than exempt from them. They wear
+their parts, they pay for replacements out of their own budget, and a
+team that cannot afford one races it worn. What they do not get is the
+choice of *when*: `syncPartsToDrawings` models them as always rebuilding
+at the first opportunity, which is exactly the decision the garage screen
+hands to the player.
+
+At a new season every team rolls out one power unit and one of each part,
+freshly built to the drawings as they stand after the winter, and last
+year's stock is written off. The development token pool is reissued with
+the seasonal cap — the cap used to reset on its own, which left the pool
+it is spent from empty and the whole tech tree unaffordable from season
+two onwards.
+
 ## Squads and the entry list
 
 A team's drivers and a team's cars are two different lists.

@@ -223,6 +223,42 @@ export interface PartState {
   variantId: string | null;
 }
 
+/**
+ * A physical part, made to a drawing and wearing out from there.
+ *
+ * `PartState.level` is the design; this is one object built to it. The
+ * spec is frozen at the moment of the build, so later development
+ * improves the next part rather than the one already on the car.
+ */
+export interface BuiltPart {
+  id: string;
+  category: PartCategory;
+  /**
+   * Which of the team's two cars this part belongs to, 0 or 1.
+   *
+   * A part belongs to a car, not to a driver: swapping who sits in the
+   * seat does not move the floor across the garage. What the driver does
+   * change is how fast it wears — the same wing lasts noticeably longer
+   * on the smoother of two team-mates.
+   */
+  carIndex: number;
+  builtInSeason: number;
+  /** The drawing level it was made to. Never changes after the build. */
+  spec: number;
+  mileageLaps: number;
+  /** 100 fresh, 0 finished. */
+  healthPct: number;
+  status: 'FITTED' | 'POOL' | 'RETIRED';
+  /**
+   * Part of the car as homologated at the start of the season, rather
+   * than something built during it. These do not count against the
+   * build allowance: the allowance governs what a team makes in-season,
+   * and charging it for the car it turned up with would leave a
+   * two-chassis allowance spent before the first race.
+   */
+  homologated?: boolean;
+}
+
 /** A physical power unit: a spec, and mileage on it. */
 export interface PowerUnitState {
   id: string;
@@ -267,6 +303,20 @@ export interface TeamSeasonState {
   parts: PartState[];
   powerUnits: PowerUnitState[];
   fittedPowerUnitId: string | null;
+  /**
+   * Physical parts this team has made, across both cars: fitted, spare
+   * and scrapped. One drawing office, two garages — the design is shared
+   * and what is bolted to each car is not.
+   */
+  builtParts: BuiltPart[];
+  /**
+   * Per-car statistics, index 0 and 1. Derived from each car's own
+   * fitted parts, so two cars on the same drawings can be genuinely
+   * different machines by mid-season. `car` above stays the team's
+   * headline figure — the average of these — for the tables and the
+   * comparisons that talk about a constructor rather than a car.
+   */
+  cars: CarStats[];
   development: DevelopmentProject[];
   philosophy: DevelopmentPhilosophy;
 }
@@ -312,6 +362,27 @@ export interface DriverCondition {
   mood: number;
   /** 0-100. Accumulated pressure — this is what makes mistakes. */
   stress: number;
+  /**
+   * The last few things that moved them, newest first.
+   *
+   * Without this the four numbers above are sliders: they go up and
+   * down and the player never learns why, so a driver reads as a gauge
+   * rather than as somebody having a season. This is the memory that
+   * makes the gauge legible — and it is what the driver themselves is
+   * referring to when they bring something up on the radio.
+   */
+  recent?: ConditionNote[];
+}
+
+/** One thing that happened to a driver, and what it did to them. */
+export interface ConditionNote {
+  season: number;
+  round: number;
+  /** In plain words, from the driver's point of view. */
+  label: string;
+  mood: number;
+  stress: number;
+  morale: number;
 }
 
 /* ---------------------------- driver careers --------------------------- */
@@ -574,7 +645,7 @@ export interface RoundRecord {
   pointsScored: number;
 }
 
-export const SAVE_VERSION = 13;
+export const SAVE_VERSION = 15;
 
 export interface GameState {
   /** Bumped when the shape changes; older saves are discarded on load. */
@@ -684,6 +755,11 @@ export type GameEvent =
   | { type: 'CANCEL_PART_DEVELOPMENT'; projectId: string }
   | { type: 'BUILD_POWER_UNIT' }
   | { type: 'FIT_POWER_UNIT'; unitId: string }
+  /* ---- the garage: build a part, then bolt it on ---- */
+  | { type: 'BUILD_PART'; category: PartCategory; carIndex: number }
+  /** `carIndex` omitted keeps the part on the car it was built for. */
+  | { type: 'FIT_PART'; partId: string; carIndex?: number }
+  | { type: 'SCRAP_PART'; partId: string }
   | { type: 'SET_PHILOSOPHY'; philosophy: DevelopmentPhilosophy }
   | { type: 'START_UPGRADE'; variantId: string }
   | { type: 'CANCEL_UPGRADE'; variantId: string }

@@ -27,6 +27,7 @@ import { canStartUpgrade, variantStatus } from '@/game/machine';
 import type { UpgradeStatus } from '@/game/machine';
 import { upgradeCashCost } from '@/game/finance';
 import { cx, formatCurrency } from '@/lib/format';
+import { PartDevelopmentPanel } from '@/components/career/PartDevelopmentPanel';
 import { useGame } from '@/state/gameContext';
 import type { GameState } from '@/game/types';
 import type {
@@ -530,6 +531,8 @@ export function RndCenterView() {
           </div>
         </div>
       </Panel>
+
+      <PartDevelopmentPanel />
 
       <Panel
         title="Development Tech Tree"

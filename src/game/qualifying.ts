@@ -1,4 +1,5 @@
 import { carRating, driverRating } from '@/data/grid2026';
+import type { CarStats } from '@/data/grid2026';
 import { profileFor } from './difficulty';
 import type { Driver } from '@/types';
 import type { Track } from '@/types/career';
@@ -50,6 +51,12 @@ export interface QualifyingInput {
   playerTeamId?: string | null;
   /** Simulator level lifts the player's single-lap pace a fraction. */
   playerQualifyingEdge?: number;
+  /**
+   * Per-driver car statistics, when the caller knows which of a team's
+   * two cars each driver is in. Without it every driver is timed in the
+   * team's average car, which is what a save with no inventory has.
+   */
+  carStats?: Record<string, CarStats>;
 }
 
 /**
@@ -59,7 +66,7 @@ export interface QualifyingInput {
 function baseLapTimeMs(
   track: Track,
   driver: Driver,
-  car: TeamSeasonState | undefined,
+  carStats: CarStats | undefined,
   difficulty: Difficulty,
   isPlayerCar: boolean,
   playerEdge: number,
@@ -67,7 +74,7 @@ function baseLapTimeMs(
   const reference = track.lapRecordMs * 1.015;
   const profile = profileFor(difficulty);
 
-  const carScore = car ? carRating(car.car) : 70;
+  const carScore = carStats ? carRating(carStats) : 70;
   const driverScore = driverRating(driver);
 
   // A 100-rated package sits on the reference; everything else is slower.
@@ -96,7 +103,10 @@ export function simulateQualifying(input: QualifyingInput): QualifyingResult {
     const teamId = driverTeams[driver.id] ?? driver.teamId;
     const car = teamById.get(teamId);
     const isPlayerCar = Boolean(input.playerTeamId) && teamId === input.playerTeamId;
-    const base = baseLapTimeMs(track, driver, car, difficulty, isPlayerCar, playerEdge);
+    /* The car this driver is actually in, when the caller knows which —
+     * two cars in one garage are two different machines by mid-season. */
+    const stats = input.carStats?.[driver.id] ?? car?.car;
+    const base = baseLapTimeMs(track, driver, stats, difficulty, isPlayerCar, playerEdge);
 
     // Consistency decides how tightly the five laps cluster. A stronger
     // AI also makes fewer scruffy laps, which is most of what separates

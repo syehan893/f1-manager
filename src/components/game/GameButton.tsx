@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { cx } from '@/lib/format';
+import { useSound } from '@/state/useSound';
 
 type Variant = 'primary' | 'secondary' | 'danger' | 'ghost';
 type Size = 'sm' | 'md' | 'lg';
@@ -43,10 +44,21 @@ export function GameButton({
   className,
   type = 'button',
 }: GameButtonProps) {
+  const play = useSound();
+
   return (
     <button
       type={type}
-      onClick={onClick}
+      onClick={
+        onClick &&
+        ((...args: []) => {
+          /* The quietest sound in the set, on the one control every
+           * screen routes its primary actions through. Anything louder,
+           * on anything more numerous, is what gets an interface muted. */
+          play('click');
+          onClick(...args);
+        })
+      }
       disabled={disabled}
       title={title}
       className={cx(

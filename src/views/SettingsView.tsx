@@ -1,5 +1,15 @@
 import { useState } from 'react';
-import { Bell, Database, Gauge, HardDrive, Palette, Plug, Settings } from 'lucide-react';
+import {
+  Bell,
+  Database,
+  Gauge,
+  HardDrive,
+  Palette,
+  Plug,
+  Settings,
+  Volume2,
+  VolumeX,
+} from 'lucide-react';
 import { Panel } from '@/components/ui/Panel';
 import { Badge } from '@/components/ui/Badge';
 import { SegmentedControl } from '@/components/ui/SegmentedControl';
@@ -8,9 +18,12 @@ import { GameButton } from '@/components/game/GameButton';
 import { SLOT_ID } from '@/game/persistence';
 import { cx } from '@/lib/format';
 import { DIFFICULTY_ORDER, profileFor } from '@/game/difficulty';
+import { playSound as playSample } from '@/lib/audio';
+import { useSoundPrefs } from '@/state/useSound';
 import { useGame } from '@/state/gameContext';
 
 export function SettingsView() {
+  const sound = useSoundPrefs();
   const { state, origin, dispatch, save } = useGame();
 
   const [units, setUnits] = useState<'metric' | 'imperial'>('metric');
@@ -89,6 +102,75 @@ export function SettingsView() {
             enabled={toggles.reducedMotion}
             onChange={setToggle('reducedMotion')}
           />
+        </div>
+      </Panel>
+
+      <Panel title="Sound" icon={<Volume2 className="size-3.5" />}>
+        <p className="mb-3 text-[11px] leading-relaxed text-chrome-500">
+          Every sound in the game is generated in the browser rather than loaded — the engine
+          note follows the leader's pace instead of looping a recording, and nothing is
+          downloaded. Your setting is remembered on this device.
+        </p>
+
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => {
+              sound.toggle();
+              if (sound.muted) playSample('confirm');
+            }}
+            title={sound.muted ? 'Turn sound on' : 'Mute everything'}
+            className={cx(
+              'grid size-10 shrink-0 place-items-center rounded-lg border transition-colors',
+              sound.muted
+                ? 'border-carbon-600 bg-carbon-800/70 text-chrome-500'
+                : 'border-neon-cyan/45 bg-neon-cyan/12 text-neon-cyan',
+            )}
+          >
+            {sound.muted ? <VolumeX className="size-4" /> : <Volume2 className="size-4" />}
+          </button>
+
+          <label className="min-w-0 flex-1">
+            <span className="flex items-center justify-between text-[10px] tracking-widest text-chrome-500 uppercase">
+              Master volume
+              <span className="font-mono text-chrome-300">
+                {sound.muted ? 'muted' : `${Math.round(sound.volume * 100)}%`}
+              </span>
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={Math.round(sound.volume * 100)}
+              disabled={sound.muted}
+              aria-label="Master volume"
+              onChange={(event) => sound.setVolume(Number(event.target.value) / 100)}
+              onPointerUp={() => playSample('click')}
+              className="mt-1.5 w-full accent-[var(--color-neon-cyan)] disabled:opacity-40"
+            />
+          </label>
+        </div>
+
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {(
+            [
+              ['Pit stop', 'pitStop'],
+              ['Overtake', 'overtake'],
+              ['Radio', 'radio'],
+              ['Fastest lap', 'fastestLap'],
+              ['Chequered', 'chequered'],
+            ] as const
+          ).map(([label, id]) => (
+            <button
+              key={id}
+              type="button"
+              disabled={sound.muted}
+              onClick={() => playSample(id)}
+              className="rounded-md border border-carbon-600 bg-carbon-900/60 px-2.5 py-1 text-[10px] font-bold tracking-wider text-chrome-400 uppercase transition-colors hover:text-chrome-100 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {label}
+            </button>
+          ))}
         </div>
       </Panel>
 

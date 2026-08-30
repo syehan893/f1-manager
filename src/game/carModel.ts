@@ -1,5 +1,11 @@
 import type { CarStats } from '@/data/grid2026';
-import type { PartCategory, PartState, PowerUnitState, TeamSeasonState } from './types';
+import type {
+  BuiltPart,
+  PartCategory,
+  PartState,
+  PowerUnitState,
+  TeamSeasonState,
+} from './types';
 
 /* =====================================================================
  * The car as an assembly of parts.
@@ -36,6 +42,16 @@ export interface PartDefinition {
   costFactor: number;
   /** Weeks a single development step takes at normal intensity. */
   baseWeeks: number;
+  /**
+   * Race weekends a fresh one lasts before it is worn out. A front wing
+   * is consumable and a chassis is not, and that difference is most of
+   * what makes a build plan a plan rather than a shopping list.
+   */
+  lifeRounds: number;
+  /** Physical builds allowed per season. The regulator's limit. */
+  buildAllowance: number;
+  /** Relative cost of building one, against the reference part. */
+  buildCostFactor: number;
 }
 
 export const PARTS: PartDefinition[] = [
@@ -46,6 +62,9 @@ export const PARTS: PartDefinition[] = [
     effect: 'Straight-line power, and most of the power unit rating.',
     costFactor: 1.9,
     baseWeeks: 8,
+    lifeRounds: 6,
+    buildAllowance: 4,
+    buildCostFactor: 2.4,
   },
   {
     id: 'TURBO',
@@ -54,6 +73,9 @@ export const PARTS: PartDefinition[] = [
     effect: 'Throttle response and top-end boost.',
     costFactor: 1.5,
     baseWeeks: 6,
+    lifeRounds: 6,
+    buildAllowance: 4,
+    buildCostFactor: 1.5,
   },
   {
     id: 'MGU_K',
@@ -62,6 +84,9 @@ export const PARTS: PartDefinition[] = [
     effect: 'Deployment and recovery under braking.',
     costFactor: 1.5,
     baseWeeks: 6,
+    lifeRounds: 6,
+    buildAllowance: 4,
+    buildCostFactor: 1.4,
   },
   {
     id: 'MGU_H',
@@ -70,6 +95,9 @@ export const PARTS: PartDefinition[] = [
     effect: 'Heat recovery — half the energy budget under the 2026 rules.',
     costFactor: 1.6,
     baseWeeks: 7,
+    lifeRounds: 6,
+    buildAllowance: 4,
+    buildCostFactor: 1.5,
   },
   {
     id: 'ENERGY_STORE',
@@ -78,6 +106,9 @@ export const PARTS: PartDefinition[] = [
     effect: 'How much can be deployed, and how consistently.',
     costFactor: 1.3,
     baseWeeks: 5,
+    lifeRounds: 6,
+    buildAllowance: 4,
+    buildCostFactor: 1.2,
   },
   {
     id: 'CHASSIS',
@@ -86,6 +117,9 @@ export const PARTS: PartDefinition[] = [
     effect: 'The platform everything else is bolted to. Lifts overall pace.',
     costFactor: 1.8,
     baseWeeks: 9,
+    lifeRounds: 10,
+    buildAllowance: 2,
+    buildCostFactor: 3.2,
   },
   {
     id: 'SUSPENSION',
@@ -94,6 +128,9 @@ export const PARTS: PartDefinition[] = [
     effect: 'Mechanical grip, kerb behaviour and tyre life.',
     costFactor: 1.1,
     baseWeeks: 5,
+    lifeRounds: 4,
+    buildAllowance: 6,
+    buildCostFactor: 1.0,
   },
   {
     id: 'BRAKES',
@@ -102,6 +139,9 @@ export const PARTS: PartDefinition[] = [
     effect: 'Stopping power and stability under braking.',
     costFactor: 0.9,
     baseWeeks: 4,
+    lifeRounds: 3,
+    buildAllowance: 8,
+    buildCostFactor: 0.5,
   },
   {
     id: 'GEARBOX',
@@ -110,6 +150,9 @@ export const PARTS: PartDefinition[] = [
     effect: 'Shift losses and traction out of slow corners.',
     costFactor: 1.2,
     baseWeeks: 6,
+    lifeRounds: 5,
+    buildAllowance: 5,
+    buildCostFactor: 1.3,
   },
   {
     id: 'FRONT_WING',
@@ -118,6 +161,9 @@ export const PARTS: PartDefinition[] = [
     effect: 'Front-end load and how the floor is fed.',
     costFactor: 0.7,
     baseWeeks: 3,
+    lifeRounds: 3,
+    buildAllowance: 8,
+    buildCostFactor: 0.6,
   },
   {
     id: 'REAR_WING',
@@ -126,6 +172,9 @@ export const PARTS: PartDefinition[] = [
     effect: 'Rear load and straight-line efficiency.',
     costFactor: 0.7,
     baseWeeks: 3,
+    lifeRounds: 3,
+    buildAllowance: 8,
+    buildCostFactor: 0.6,
   },
   {
     id: 'FLOOR',
@@ -134,6 +183,9 @@ export const PARTS: PartDefinition[] = [
     effect: 'The largest single source of downforce on the car.',
     costFactor: 1.4,
     baseWeeks: 6,
+    lifeRounds: 6,
+    buildAllowance: 4,
+    buildCostFactor: 1.8,
   },
   {
     id: 'ACTIVE_AERO',
@@ -142,6 +194,9 @@ export const PARTS: PartDefinition[] = [
     effect: 'How much of the lap is spent in the low-drag mode.',
     costFactor: 1.1,
     baseWeeks: 5,
+    lifeRounds: 5,
+    buildAllowance: 5,
+    buildCostFactor: 0.9,
   },
   {
     id: 'COOLING',
@@ -150,6 +205,9 @@ export const PARTS: PartDefinition[] = [
     effect: 'Thermal headroom — how hard the package can be run.',
     costFactor: 0.9,
     baseWeeks: 4,
+    lifeRounds: 5,
+    buildAllowance: 5,
+    buildCostFactor: 0.7,
   },
 ];
 
@@ -165,6 +223,256 @@ export const POWER_UNIT_PARTS: PartCategory[] = [
   'MGU_H',
   'ENERGY_STORE',
 ];
+
+/** Everything that is not part of the power unit, built one at a time. */
+export const ASSEMBLY_PARTS: PartCategory[] = PART_CATEGORIES.filter(
+  (category) => !POWER_UNIT_PARTS.includes(category),
+);
+
+/* ------------------------- parts as real objects ----------------------- */
+
+/*
+ * A development level and a part are two different things.
+ *
+ * `PartState.level` is the *design*: what the drawing office has got to,
+ * and what R&D moves. `BuiltPart` is a physical object made to that
+ * drawing — its spec frozen at the moment it was built, and wearing out
+ * from there. Developing the floor tomorrow does not improve the floor
+ * already bolted to the car, exactly as a new engine spec does not
+ * improve the engine already in it.
+ *
+ * That is the whole loop the garage runs on: R&D raises the drawing, the
+ * factory builds to it, the mechanics fit what was built, and the part
+ * wears until it has to be built again — at whatever the drawing says by
+ * then.
+ */
+
+/** Worst a part performs at the end of its life, as a share of its spec. */
+const WORN_PART_FLOOR = 0.82;
+
+/**
+ * How much of a part's paper spec is still there at a given health.
+ * A fresh part is exactly its spec; a finished one is a little over
+ * three-quarters of it, which is a real loss without being a cliff.
+ */
+export function partHealthFactor(healthPct: number): number {
+  const health = Math.max(0, Math.min(100, healthPct));
+  /* Exactly 1 at full health rather than a floating-point hair above it.
+   * Every car on the grid is assembled from fresh parts at the start of
+   * a season, so this is the identity that makes the published grid come
+   * out at the published numbers. */
+  if (health >= 100) return 1;
+  return WORN_PART_FLOOR + (health / 100) * (1 - WORN_PART_FLOOR);
+}
+
+/** Cars a team enters, and therefore garages it runs. */
+export const CARS_PER_TEAM = 2;
+
+/** The part of this category bolted to one particular car. */
+export function fittedPart(
+  team: TeamSeasonState,
+  category: PartCategory,
+  carIndex: number,
+): BuiltPart | null {
+  return (
+    (team.builtParts ?? []).find(
+      (part) =>
+        part.category === category &&
+        part.carIndex === carIndex &&
+        part.status === 'FITTED',
+    ) ?? null
+  );
+}
+
+/**
+ * Spares of a category, freshest first.
+ *
+ * A spare belongs to the garage rather than to one car: a wing built for
+ * the first car can be bolted to the second, which is what makes a spare
+ * worth having at all.
+ */
+export function sparePartsOf(team: TeamSeasonState, category: PartCategory): BuiltPart[] {
+  return (team.builtParts ?? [])
+    .filter((part) => part.category === category && part.status === 'POOL')
+    .sort((a, b) => b.healthPct - a.healthPct || b.spec - a.spec);
+}
+
+/**
+ * Builds of this category used against the season's allowance.
+ *
+ * The allowance is the team's, not the car's — the regulations count
+ * parts made, and a wing is a wing whichever side of the garage it ends
+ * up on. Two cars therefore compete for one budget of builds, which is
+ * the decision the screen is asking the player to make.
+ */
+export function buildsUsed(
+  team: TeamSeasonState,
+  category: PartCategory,
+  season: number,
+): number {
+  return (team.builtParts ?? []).filter(
+    (part) =>
+      part.category === category &&
+      part.builtInSeason === season &&
+      // The car as homologated is not a build out of the allowance.
+      !part.homologated,
+  ).length;
+}
+
+export function buildsRemaining(
+  team: TeamSeasonState,
+  category: PartCategory,
+  season: number,
+): number {
+  const allowance = PART_BY_ID.get(category)?.buildAllowance ?? 4;
+  return Math.max(0, allowance - buildsUsed(team, category, season));
+}
+
+/** Base spend on the reference part before spec and scarcity are counted. */
+const BASE_BUILD_COST = 900_000;
+
+/**
+ * What one part costs to make.
+ *
+ * Two things drive it: the spec on the drawing, steeply — a 95 floor is
+ * a different object from a 70 floor, not a slightly better one — and
+ * whether the season's allowance has already been used, because a part
+ * built outside the planned run is built in a hurry and paid for like it.
+ */
+export function partBuildCost(
+  team: TeamSeasonState,
+  category: PartCategory,
+  season: number,
+): number {
+  const definition = PART_BY_ID.get(category);
+  const spec = levelOf(team.parts, category);
+  const specFactor = 1 + Math.pow(Math.max(0, spec - 55) / 45, 2) * 3.4;
+  const rushed = buildsUsed(team, category, season) >= (definition?.buildAllowance ?? 4) ? 1.6 : 1;
+
+  const cost = BASE_BUILD_COST * (definition?.buildCostFactor ?? 1) * specFactor * rushed;
+  return Math.round(cost / 50_000) * 50_000;
+}
+
+/** Makes one part to the current drawing. Frozen at this spec from here. */
+export function buildPart(
+  team: TeamSeasonState,
+  category: PartCategory,
+  season: number,
+  serial: number,
+  carIndex = 0,
+): BuiltPart {
+  return {
+    id: `part-${category.toLowerCase()}-${season}-${serial}`,
+    category,
+    carIndex,
+    builtInSeason: season,
+    spec: levelOf(team.parts, category),
+    mileageLaps: 0,
+    healthPct: 100,
+    status: 'POOL',
+  };
+}
+
+/**
+ * Wears the fitted parts by one race weekend.
+ *
+ * Health is spent per weekend rather than per lap so that the same plan
+ * works at every race length — a 25% season would otherwise never wear
+ * anything out and the whole system would be invisible at the default
+ * settings. Distance still counts for something, just not for everything.
+ */
+export function wearFittedParts(
+  team: TeamSeasonState,
+  laps: number,
+  raceLengthPct: number,
+  /**
+   * Per-car multiplier on wear, from whoever is driving it. Index 0 and
+   * 1; anything missing is treated as an average driver. This is why two
+   * cars built the same weekend need rebuilding at different times.
+   */
+  driverWear: number[] = [],
+): BuiltPart[] {
+  const worn: BuiltPart[] = [];
+  const distance = 0.7 + (Math.max(25, Math.min(100, raceLengthPct)) / 100) * 0.3;
+
+  for (const part of team.builtParts ?? []) {
+    if (part.status !== 'FITTED') continue;
+
+    const life = PART_BY_ID.get(part.category)?.lifeRounds ?? 5;
+    const hands = driverWear[part.carIndex] ?? 1;
+    const before = part.healthPct;
+
+    part.mileageLaps += laps;
+    part.healthPct = Math.max(
+      0,
+      Math.round((part.healthPct - (100 / life) * distance * hands) * 10) / 10,
+    );
+
+    /* Only the weekend it actually goes. A part that is already finished
+     * is still finished next week, and reporting it again every race
+     * would have the drivers writing the same letter until somebody
+     * replaced it. */
+    if (before > 0 && part.healthPct <= 0) worn.push(part);
+  }
+
+  return worn;
+}
+
+/**
+ * Brings a team's fitted parts up to its own drawings, keeping the wear
+ * they have already taken.
+ *
+ * This is the AI's garage, abstracted. A rival's development has to
+ * reach its car or the whole difficulty system quietly stops working —
+ * but a rival should not be exempt from wear either, or the player is
+ * paying a running cost nobody else pays. So the AI is modelled as a
+ * team that always rebuilds to the latest drawing at the first
+ * opportunity, and still loses performance between those rebuilds.
+ *
+ * The player is deliberately not put through this: choosing when to
+ * spend a build is the decision the garage screen exists for.
+ */
+export function syncPartsToDrawings(team: TeamSeasonState): boolean {
+  let changed = false;
+
+  for (const part of team.builtParts ?? []) {
+    if (part.status !== 'FITTED') continue;
+    const drawing = levelOf(team.parts, part.category);
+    if (drawing <= part.spec) continue;
+    part.spec = drawing;
+    changed = true;
+  }
+
+  return changed;
+}
+
+/** Whether a part is one of the five that make up a power unit. */
+export function isPowerUnitPart(category: PartCategory): boolean {
+  return POWER_UNIT_PARTS.includes(category);
+}
+
+/**
+ * A full set of fresh parts at the current drawing, all fitted.
+ *
+ * This is what a team rolls out at the start of a season, and what seeds
+ * an existing save that has never had an inventory.
+ */
+export function buildFullSet(team: TeamSeasonState, season: number): BuiltPart[] {
+  const set: BuiltPart[] = [];
+
+  for (let carIndex = 0; carIndex < CARS_PER_TEAM; carIndex++) {
+    for (const [index, category] of ASSEMBLY_PARTS.entries()) {
+      set.push({
+        ...buildPart(team, category, season, carIndex * ASSEMBLY_PARTS.length + index, carIndex),
+        status: 'FITTED' as const,
+        // The car as homologated, not something built out of the allowance.
+        homologated: true,
+      });
+    }
+  }
+
+  return set;
+}
 
 /* --------------------------- how stats derive -------------------------- */
 
@@ -238,15 +546,49 @@ export function engineHealthFactor(unit: PowerUnitState | null): number {
 }
 
 /**
+ * The level each category actually contributes today.
+ *
+ * The drawing is only what the car *could* be. What it is, is whatever
+ * is bolted to it: a part's frozen spec, faded by how worn it is. A
+ * category with nothing built for it falls back to the drawing, which is
+ * what keeps a team with no inventory — every AI team, and any save from
+ * before parts were objects — behaving exactly as it did.
+ */
+function effectiveLevels(
+  parts: PartState[],
+  builtParts: BuiltPart[] | undefined,
+  carIndex: number,
+): PartState[] {
+  if (!builtParts || builtParts.length === 0) return parts;
+
+  const fitted = new Map<PartCategory, BuiltPart>();
+  for (const part of builtParts) {
+    if (part.status === 'FITTED' && part.carIndex === carIndex) {
+      fitted.set(part.category, part);
+    }
+  }
+  if (fitted.size === 0) return parts;
+
+  return parts.map((part) => {
+    const built = fitted.get(part.category);
+    if (!built) return part;
+    return { ...part, level: built.spec * partHealthFactor(built.healthPct) };
+  });
+}
+
+/**
  * Fold parts and the fitted power unit into the statistics every other
  * system reads. This is the only place car numbers come from.
  */
 export function assembleCar(
-  parts: PartState[],
+  designParts: PartState[],
   fittedUnit: PowerUnitState | null,
   pitCrew: number,
+  builtParts?: BuiltPart[],
+  carIndex = 0,
 ): CarStats {
   const health = engineHealthFactor(fittedUnit);
+  const parts = effectiveLevels(designParts, builtParts, carIndex);
 
   /* A tired unit costs power and energy directly, and reliability by
    * rather more — it is the wear itself that strands the car. */
@@ -389,5 +731,35 @@ export function unitSpecRating(unit: PowerUnitState): number {
  * stale and nothing downstream has to know parts exist.
  */
 export function refreshCar(team: TeamSeasonState): void {
-  team.car = assembleCar(team.parts, fittedUnit(team), team.car.pitCrew);
+  const unit = fittedUnit(team);
+
+  /* Each car is assembled from its own parts. Two cars on the same
+   * drawings drift apart as the season goes on, because they are worn by
+   * two different drivers and rebuilt at two different moments. */
+  team.cars = Array.from({ length: CARS_PER_TEAM }, (_, carIndex) =>
+    assembleCar(team.parts, unit, team.car.pitCrew, team.builtParts, carIndex),
+  );
+
+  /* The team's headline figure is the average of its two cars. Every
+   * table that ranks constructors rather than cars reads this, and a
+   * team is fairly described by what it actually puts on track. */
+  const mean = (key: keyof CarStats) =>
+    team.cars.reduce((sum, car) => sum + car[key], 0) / team.cars.length;
+
+  team.car = {
+    pace: mean('pace'),
+    aero: mean('aero'),
+    powerUnit: mean('powerUnit'),
+    electrical: mean('electrical'),
+    reliability: mean('reliability'),
+    pitCrew: mean('pitCrew'),
+    brakes: mean('brakes'),
+    suspension: mean('suspension'),
+    cooling: mean('cooling'),
+  };
+}
+
+/** One car's statistics, falling back to the team's when it has none. */
+export function carStatsOf(team: TeamSeasonState, carIndex: number): CarStats {
+  return team.cars?.[carIndex] ?? team.car;
 }

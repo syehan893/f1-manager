@@ -12,6 +12,7 @@ import {
   staffTyreWearMultiplier,
 } from '@/game/staffing';
 import { carRating } from '@/data/grid2026';
+import { statsForDriver } from '@/game/roster';
 import { driverAdaptationPenalty } from '@/game/driverDevelopment';
 import { isRacePhase } from '@/game/phases';
 import { scaledLaps, trackToCircuit } from '@/game/trackAdapter';
@@ -92,12 +93,12 @@ export function CareerRaceProvider({ children }: { children: ReactNode }) {
    * engineering group adds a little on top for the player's own cars. */
   const carPace = useMemo(() => {
     if (!state) return undefined;
-    const byTeam = new Map(state.teams.map((team) => [team.teamId, carRating(team.car)]));
     const engineered = staffRacePaceEdge(state) * 1000;
     return Object.fromEntries(
       Object.entries(state.driverTeams).map(([driverId, teamId]) => [
         driverId,
-        (byTeam.get(teamId) ?? 70) + (teamId === state.playerTeamId ? engineered : 0),
+        carRating(statsForDriver(state, driverId)) +
+          (teamId === state.playerTeamId ? engineered : 0),
       ]),
     );
   }, [state]);
@@ -140,12 +141,12 @@ export function CareerRaceProvider({ children }: { children: ReactNode }) {
    * that actually has to survive the afternoon. */
   const reliability = useMemo(() => {
     if (!state) return undefined;
-    const byTeam = new Map(state.teams.map((team) => [team.teamId, team.car.reliability]));
     const bonus = staffReliabilityBonus(state);
     return Object.fromEntries(
       Object.entries(state.driverTeams).map(([driverId, teamId]) => [
         driverId,
-        (byTeam.get(teamId) ?? 62) + (teamId === state.playerTeamId ? bonus : 0),
+        statsForDriver(state, driverId).reliability +
+          (teamId === state.playerTeamId ? bonus : 0),
       ]),
     );
   }, [state]);

@@ -1,6 +1,8 @@
+import { useEffect } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { CircleAlert, CircleCheck, Info, X } from 'lucide-react';
 import { cx } from '@/lib/format';
+import { useSound } from '@/state/useSound';
 import { useGame } from '@/state/gameContext';
 
 const TONE = {
@@ -21,6 +23,15 @@ const TONE = {
 /** Surfaces refused transitions and machine feedback. */
 export function GameNotice() {
   const { notice, dismissNotice } = useGame();
+  const play = useSound();
+
+  /* The notice is the one place every accepted and refused action passes
+   * through, so it is the honest place to hang the feedback: a refusal
+   * sounds like a refusal wherever in the game it came from. */
+  useEffect(() => {
+    if (!notice) return;
+    play(notice.kind === 'error' ? 'refuse' : notice.kind === 'success' ? 'confirm' : 'notify');
+  }, [notice, play]);
 
   return (
     <div className="pointer-events-none fixed bottom-4 left-1/2 z-50 w-[min(420px,calc(100vw-2rem))] -translate-x-1/2">

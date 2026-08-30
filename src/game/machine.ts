@@ -6,13 +6,20 @@ import {
   ENGINE_ALLOCATION,
   ENGINE_WEAR_PER_RACE_LAP,
   PART_BY_ID,
+  buildFullSet,
+  buildPart,
   buildPowerUnit,
+  CARS_PER_TEAM,
+  buildsRemaining,
   enginePenaltyPlaces,
+  fittedPart,
   fittedUnit,
+  partBuildCost,
   powerUnitCost,
   refreshCar,
   seedParts,
   unitSpecRating,
+  wearFittedParts,
 } from './carModel';
 import {
   PART_AREA,
@@ -28,6 +35,7 @@ import {
   GRID_SEATS_PER_TEAM,
   MAX_SQUAD_SIZE,
   demoteToReserve,
+  driverWearFactor,
   joinSquad,
   leaveSquad,
   openSeatsAt,
@@ -49,6 +57,7 @@ import {
   signingCost,
 } from './contracts';
 import { postMail } from './mail';
+import { driverGarageMail, mechanicSummary } from './garageMail';
 import {
   announceContract,
   announceQualifying,
@@ -62,12 +71,15 @@ import {
 import {
   advanceDriverSeason,
   buildProspects,
+  effectiveDriver,
   seedDriverRecords,
 } from './driverDevelopment';
 import { developAiCars, developAiPreSeason } from './aiDevelopment';
 import {
   CONDITION_EVENTS,
+  CONDITION_LABEL,
   applyConditionEvent,
+  temperamentOf,
   applyRaceFatigue,
   blankCondition,
   recoverBetweenRounds,
@@ -117,8 +129,10 @@ import {
   updateManagerScore,
 } from './jobMarket';
 import { SAVE_VERSION } from './types';
+import type { CarStats } from '@/data/grid2026';
 import type { ComponentVariant } from '@/types/career';
 import type {
+  BuiltPart,
   DriverRole,
   GameEvent,
   GameEventType,
@@ -202,6 +216,9 @@ const MANAGEMENT_ACTIONS: GameEventType[] = [
   'CANCEL_PART_DEVELOPMENT',
   'BUILD_POWER_UNIT',
   'FIT_POWER_UNIT',
+  'BUILD_PART',
+  'FIT_PART',
+  'SCRAP_PART',
   'SET_PHILOSOPHY',
   'START_UPGRADE',
   'CANCEL_UPGRADE',
@@ -325,16 +342,29 @@ export function createNewGame(managerName = 'New Manager'): GameState {
       teamId: team.id,
       budget: team.budget,
       car: { ...team.car },
+      // Filled in by `refreshCar` below, once the parts exist.
+      cars: [] as CarStats[],
       parts,
       powerUnits: [first],
       fittedPowerUnitId: first.id,
+      /* Seeded for every team below, so wear is the same rule for the
+       * whole grid: a rival's car fades between rebuilds exactly as the
+       * player's does, and a team that cannot afford to replace a worn
+       * part races it worn. */
+      builtParts: [] as BuiltPart[],
       development: [],
       philosophy: 'BALANCED' as const,
     };
   });
 
-  // Fold the seeded parts back into the cached statistics.
-  for (const team of teams) refreshCar(team);
+  /* Roll every team out on a full set of fresh parts built to its own
+   * drawings, then fold the result back into the cached statistics. A
+   * fresh part is worth exactly its spec, so the grid opens on precisely
+   * the numbers the data file publishes. */
+  for (const team of teams) {
+    team.builtParts = buildFullSet(team, 2026);
+    refreshCar(team);
+  }
 
   return {
     version: SAVE_VERSION,
@@ -568,8 +598,10 @@ function clone(state: GameState): GameState {
     teams: state.teams.map((team) => ({
       ...team,
       car: { ...team.car },
+      cars: (team.cars ?? []).map((car) => ({ ...car })),
       parts: team.parts.map((part) => ({ ...part })),
       powerUnits: team.powerUnits.map((unit) => ({ ...unit, spec: { ...unit.spec } })),
+      builtParts: (team.builtParts ?? []).map((part) => ({ ...part })),
       development: team.development.map((project) => ({ ...project })),
     })),
     driverTeams: { ...state.driverTeams },
@@ -726,6 +758,17 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
     case 'CONFIRM_TEAM': {
       if (!next.pendingTeamId) return refuse('Select a team before continuing.');
       next.playerTeamId = next.pendingTeamId;
+
+      /* Every team was rolled out on a full set when the career was
+       * created, so there is nothing to stock here — but a save made
+       * before parts were objects has an empty garage, and opening a
+       * career with a car assembled from nothing is not a thing to
+       * discover on a Sunday. */
+      const team = next.teams.find((entry) => entry.teamId === next.playerTeamId);
+      if (team && (team.builtParts ?? []).length === 0) {
+        team.builtParts = buildFullSet(team, next.season);
+        refreshCar(team);
+      }
       break;
     }
 
@@ -839,6 +882,83 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
       unit.status = 'FITTED';
       team.fittedPowerUnitId = unit.id;
       refreshCar(team);
+      break;
+    }
+
+    case 'BUILD_PART': {
+      const team = next.teams.find((t) => t.teamId === next.playerTeamId);
+      if (!team) return refuse('No team selected.');
+
+      const definition = PART_BY_ID.get(event.category);
+      if (!definition) return refuse('No such part.');
+
+      /* The allowance is the regulator's, and it is a cap rather than a
+       * gate: a part built beyond it is still legal, it just costs half
+       * as much again to make in a hurry. */
+      const remaining = buildsRemaining(team, event.category, next.season);
+      const cost = partBuildCost(team, event.category, next.season);
+      if (team.budget < cost) {
+        return refuse(
+          `A new ${definition.label.toLowerCase()} costs ${formatMillions(cost)}; you have ${formatMillions(team.budget)}.`,
+        );
+      }
+
+      if (event.carIndex < 0 || event.carIndex >= CARS_PER_TEAM) {
+        return refuse('There is no such car.');
+      }
+
+      const serial = (team.builtParts ?? []).length;
+      const made = buildPart(team, event.category, next.season, serial, event.carIndex);
+      team.builtParts = [...(team.builtParts ?? []), made];
+
+      post(
+        next,
+        'UPGRADE',
+        `${definition.label} built${remaining === 0 ? ' (outside the allowance)' : ''}`,
+        -cost,
+      );
+
+      /* Nothing on the car changes until it is fitted — that is the third
+       * step of the loop and the player's call. */
+      break;
+    }
+
+    case 'FIT_PART': {
+      const team = next.teams.find((t) => t.teamId === next.playerTeamId);
+      if (!team) return refuse('No team selected.');
+
+      const part = (team.builtParts ?? []).find((entry) => entry.id === event.partId);
+      if (!part) return refuse('No such part in the garage.');
+      if (part.status === 'FITTED') return refuse('That part is already on the car.');
+      if (part.status === 'RETIRED') return refuse('That part is finished — build a new one.');
+
+      /* A spare belongs to the garage rather than to one car, so fitting
+       * it says which car it is going on. Whatever it replaces comes off
+       * and goes back on the shelf — unless it is finished, in which case
+       * it is scrap. */
+      const target = event.carIndex ?? part.carIndex;
+      if (target < 0 || target >= CARS_PER_TEAM) return refuse('There is no such car.');
+
+      const current = fittedPart(team, part.category, target);
+      if (current) current.status = current.healthPct <= 0 ? 'RETIRED' : 'POOL';
+
+      part.carIndex = target;
+      part.status = 'FITTED';
+      refreshCar(team);
+      break;
+    }
+
+    case 'SCRAP_PART': {
+      const team = next.teams.find((t) => t.teamId === next.playerTeamId);
+      if (!team) return refuse('No team selected.');
+
+      const part = (team.builtParts ?? []).find((entry) => entry.id === event.partId);
+      if (!part) return refuse('No such part in the garage.');
+      if (part.status === 'FITTED') {
+        return refuse('That one is on the car. Fit something else first.');
+      }
+
+      team.builtParts = (team.builtParts ?? []).filter((entry) => entry.id !== event.partId);
       break;
     }
 
@@ -974,6 +1094,12 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
             blankCondition(result.demotedDriverId),
           'RESULT_POOR',
           1.4,
+          {
+            temperament: temperamentOf(effectiveDriver(next, result.demotedDriverId)),
+            season: next.season,
+            round: next.round,
+            label: `Dropped to reserve for ${promoted}`,
+          },
         );
       }
       break;
@@ -999,6 +1125,12 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         next.driverConditions[event.driverId] ?? blankCondition(event.driverId),
         'RESULT_TERRIBLE',
         1.2,
+        {
+          temperament: temperamentOf(effectiveDriver(next, event.driverId)),
+          season: next.season,
+          round: next.round,
+          label: 'Benched — taken out of the car',
+        },
       );
       break;
     }
@@ -1247,6 +1379,12 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         next.driverConditions[event.driverId] ?? blankCondition(event.driverId),
         'RESULT_GOOD',
         1.2,
+        {
+          temperament: temperamentOf(effectiveDriver(next, event.driverId)),
+          season: next.season,
+          round: next.round,
+          label: 'Signed a new contract',
+        },
       );
 
       announceContract(next, event.driverId, event.salary, event.seasons);
@@ -1550,25 +1688,45 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         if (!condition) continue;
 
         let updated = condition;
+        const temperament = temperamentOf(effectiveDriver(next, entry.driverId));
+
+        /* How hard any of this lands is the driver's own business: a
+         * volatile driver leaves Saturday transformed, a phlegmatic one
+         * barely notices. */
+        const feels = { temperament, season: next.season, round: next.round };
 
         const mate = entries.find(
           (other) => other.teamId === entry.teamId && other.driverId !== entry.driverId,
         );
         if (mate) {
+          const ahead = entry.position < mate.position;
+          const mateName = DRIVER_BY_ID[mate.driverId]?.lastName ?? 'his team-mate';
           updated = applyConditionEvent(
             updated,
-            entry.position < mate.position ? 'OUT_QUALIFIED_MATE' : 'BEATEN_BY_MATE',
+            ahead ? 'OUT_QUALIFIED_MATE' : 'BEATEN_BY_MATE',
             // A thrashing hurts more than being pipped.
             Math.min(1.6, 0.6 + Math.abs(entry.position - mate.position) * 0.18),
+            {
+              ...feels,
+              label: ahead
+                ? `Out-qualified ${mateName}, P${entry.position} to P${mate.position}`
+                : `Out-qualified by ${mateName}, P${mate.position} to P${entry.position}`,
+            },
           );
         }
 
         /* And where they ended up on the grid in absolute terms — the
          * front row lifts anybody, the back of it deflates anybody. */
         if (entry.position <= 3) {
-          updated = applyConditionEvent(updated, 'QUALIFIED_WELL', entry.position === 1 ? 1.4 : 1);
+          updated = applyConditionEvent(updated, 'QUALIFIED_WELL', entry.position === 1 ? 1.4 : 1, {
+            ...feels,
+            label: entry.position === 1 ? 'Took pole position' : `Qualified P${entry.position}`,
+          });
         } else if (entry.position >= entries.length - 4) {
-          updated = applyConditionEvent(updated, 'QUALIFIED_POORLY');
+          updated = applyConditionEvent(updated, 'QUALIFIED_POORLY', 1, {
+            ...feels,
+            label: `Qualified P${entry.position} — near the back`,
+          });
         }
 
         next.driverConditions[entry.driverId] = updated;
@@ -1621,6 +1779,13 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
       next.driverConditions[event.driverId] = applyConditionEvent(
         condition,
         event.event as ConditionEvent,
+        1,
+        {
+          temperament: temperamentOf(effectiveDriver(next, event.driverId)),
+          season: next.season,
+          round: next.round,
+          label: CONDITION_LABEL[event.event as ConditionEvent],
+        },
       );
       break;
     }
@@ -1818,21 +1983,54 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         if (!condition) continue;
 
         let updated = condition;
+        const feels = {
+          temperament: temperamentOf(effectiveDriver(next, finish.driverId)),
+          season: next.season,
+          round: next.round,
+        };
 
         if (finish.status === 'DNF') {
-          updated = applyConditionEvent(updated, 'MECHANICAL_FAILURE');
+          updated = applyConditionEvent(updated, 'MECHANICAL_FAILURE', 1, {
+            ...feels,
+            label: 'Retired — the car let him down',
+          });
         } else {
           const gained = finish.gridPosition - finish.position;
           const podium = finish.position <= 3;
+          const move =
+            gained > 0 ? ` (up ${gained} from P${finish.gridPosition})`
+            : gained < 0 ? ` (down ${-gained} from P${finish.gridPosition})`
+            : '';
 
           if (podium || gained >= 5) {
-            updated = applyConditionEvent(updated, 'RESULT_EXCELLENT');
+            updated = applyConditionEvent(updated, 'RESULT_EXCELLENT', 1, {
+              ...feels,
+              label: podium ? `Podium — P${finish.position}${move}` : `Charged to P${finish.position}${move}`,
+            });
           } else if (finish.points > 0 || gained >= 2) {
-            updated = applyConditionEvent(updated, 'RESULT_GOOD');
+            updated = applyConditionEvent(updated, 'RESULT_GOOD', 1, {
+              ...feels,
+              label: `P${finish.position}${move} — points on the board`,
+            });
           } else if (gained <= -5) {
-            updated = applyConditionEvent(updated, 'RESULT_TERRIBLE');
+            updated = applyConditionEvent(updated, 'RESULT_TERRIBLE', 1, {
+              ...feels,
+              label: `Went backwards to P${finish.position}${move}`,
+            });
           } else if (gained < 0) {
-            updated = applyConditionEvent(updated, 'RESULT_POOR');
+            updated = applyConditionEvent(updated, 'RESULT_POOR', 1, {
+              ...feels,
+              label: `P${finish.position}${move} — nothing to show for it`,
+            });
+          } else {
+            /* Finished exactly where they started, out of the points. It
+             * is not a disaster and it is not nothing: an afternoon that
+             * changed nothing still wears on somebody, and leaving it
+             * unrecorded gave half the grid an empty week every week. */
+            updated = applyConditionEvent(updated, 'RESULT_POOR', 0.45, {
+              ...feels,
+              label: `P${finish.position} — a weekend that went nowhere`,
+            });
           }
         }
 
@@ -1891,6 +2089,26 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         const wear = event.result.totalLaps * ENGINE_WEAR_PER_RACE_LAP * (1.45 - quality / 100);
         unit.healthPct = Math.max(0, Math.round((unit.healthPct - wear) * 10) / 10);
         if (unit.healthPct <= 0) unit.status = 'RETIRED';
+
+        /* And the rest of the car with it — at a rate its own driver
+         * sets, so the two cars in a garage never need rebuilding on the
+         * same weekend. */
+        const worn = wearFittedParts(
+          team,
+          event.result.totalLaps,
+          next.settings.raceLengthPct,
+          raceDriversOf(next, team.teamId).map((driverId) =>
+            driverWearFactor(next, driverId),
+          ),
+        );
+
+        /* A part that has reached the end is still on the car — a team
+         * does not race without a floor — but it is giving back the
+         * least it ever will. The drivers raise it themselves, in their
+         * own words and about their own car; the mechanic's log is the
+         * complete picture underneath. */
+        driverGarageMail(next, team, worn);
+        mechanicSummary(next, team, worn);
 
         refreshCar(team);
       }
@@ -2089,9 +2307,46 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
           next.driverTeams,
           next.teams.map((team) => team.teamId),
         );
-        // New regulations year: the development cap resets.
+        /* New regulations year: the cap resets, and so does the pool it
+         * governs. The cap alone used to reset, which read as though a
+         * fresh allocation had arrived while the pool it is spent from
+         * stayed empty — so from the second season the whole tech tree
+         * was permanently unaffordable and the R&D Center simply stopped
+         * working. The pool is what the cap is a limit on; both move. */
         next.rnd.seasonalCapTokens = SEASONAL_CAP_TOKENS;
         next.rnd.seasonalTokensUsed = 0;
+        next.rnd.developmentTokens = Math.min(
+          next.rnd.developmentTokens + SEASONAL_CAP_TOKENS,
+          SEASONAL_CAP_TOKENS * 2,
+        );
+
+        /* ---- the new car ------------------------------------------- *
+         * A season's engines and parts do not carry over. Without this
+         * the pool grew by every unit ever built and the garage filled
+         * with the spares of seasons nobody remembers. Each team keeps
+         * exactly one power unit and one of each part — freshly built to
+         * the drawings as they stand after the winter, which is where
+         * the off-season's development actually shows up. */
+        for (const team of next.teams) {
+          const winter = buildPowerUnit(team.parts, next.season, 0);
+          winter.status = 'FITTED';
+          team.powerUnits = [winter];
+          team.fittedPowerUnitId = winter.id;
+
+          team.builtParts = buildFullSet(team, next.season);
+          refreshCar(team);
+        }
+        next.pendingGridPenalty = 0;
+
+        if (next.playerTeamId) {
+          postMail(next, {
+            category: 'RND',
+            from: 'Technical Director',
+            subject: `The ${next.season} car is built`,
+            importance: 'NORMAL',
+            body: `Winter is done. A fresh power unit and a full set of parts have been made to the current drawings, all fitted, and last year's stock has been written off.\n\nThe development allowance has been reissued for the new regulations year — ${next.rnd.developmentTokens} tokens in the pool against a ${SEASONAL_CAP_TOKENS}-token seasonal cap.`,
+          });
+        }
         next.finance.seasonIncome = 0;
         next.finance.seasonExpenditure = 0;
 

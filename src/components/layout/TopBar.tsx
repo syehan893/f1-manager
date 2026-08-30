@@ -1,7 +1,17 @@
-import { Bell, CalendarDays, ChevronDown, CircleDollarSign, Database, HardDrive } from 'lucide-react';
+import {
+  Bell,
+  CalendarDays,
+  ChevronDown,
+  CircleDollarSign,
+  Database,
+  HardDrive,
+  Volume2,
+  VolumeX,
+} from 'lucide-react';
 import { motion } from 'framer-motion';
 import { NAV_ITEMS } from './navItems';
 import { cx, flagEmoji, formatCurrency } from '@/lib/format';
+import { useSoundPrefs } from '@/state/useSound';
 import { useGame } from '@/state/gameContext';
 import type { ViewId } from '@/types';
 
@@ -12,6 +22,7 @@ interface TopBarProps {
 
 /** Global header: everything here reads from the active save. */
 export function TopBar({ active, onNavigate }: TopBarProps) {
+  const sound = useSoundPrefs();
   const { state, playerTeam, currentTrack, origin, save } = useGame();
 
   const budget =
@@ -121,6 +132,23 @@ export function TopBar({ active, onNavigate }: TopBarProps) {
           {online ? <Database className="size-3" /> : <HardDrive className="size-3" />}
           {online ? 'DB' : 'Local'}
         </span>
+
+        {/* Sound — reachable from every screen, because the one moment
+            somebody wants it off is the moment it is playing. */}
+        <button
+          type="button"
+          onClick={sound.toggle}
+          title={sound.muted ? 'Sound is off' : `Sound on — ${Math.round(sound.volume * 100)}%`}
+          aria-label={sound.muted ? 'Turn sound on' : 'Mute sound'}
+          className={cx(
+            'grid size-10 shrink-0 place-items-center rounded-lg border transition-colors',
+            sound.muted
+              ? 'border-carbon-600 bg-carbon-800/70 text-chrome-500 hover:text-chrome-300'
+              : 'border-carbon-600 bg-carbon-800/70 text-chrome-300 hover:border-carbon-500 hover:text-neon-cyan',
+          )}
+        >
+          {sound.muted ? <VolumeX className="size-[18px]" /> : <Volume2 className="size-[18px]" />}
+        </button>
 
         {/* Projects in build */}
         <button
