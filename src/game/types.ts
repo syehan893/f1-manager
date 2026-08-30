@@ -362,6 +362,27 @@ export interface DriverCondition {
   mood: number;
   /** 0-100. Accumulated pressure — this is what makes mistakes. */
   stress: number;
+  /**
+   * The last few things that moved them, newest first.
+   *
+   * Without this the four numbers above are sliders: they go up and
+   * down and the player never learns why, so a driver reads as a gauge
+   * rather than as somebody having a season. This is the memory that
+   * makes the gauge legible — and it is what the driver themselves is
+   * referring to when they bring something up on the radio.
+   */
+  recent?: ConditionNote[];
+}
+
+/** One thing that happened to a driver, and what it did to them. */
+export interface ConditionNote {
+  season: number;
+  round: number;
+  /** In plain words, from the driver's point of view. */
+  label: string;
+  mood: number;
+  stress: number;
+  morale: number;
 }
 
 /* ---------------------------- driver careers --------------------------- */

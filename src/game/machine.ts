@@ -57,6 +57,7 @@ import {
   signingCost,
 } from './contracts';
 import { postMail } from './mail';
+import { driverGarageMail, mechanicSummary } from './garageMail';
 import {
   announceContract,
   announceQualifying,
@@ -70,12 +71,15 @@ import {
 import {
   advanceDriverSeason,
   buildProspects,
+  effectiveDriver,
   seedDriverRecords,
 } from './driverDevelopment';
 import { developAiCars, developAiPreSeason } from './aiDevelopment';
 import {
   CONDITION_EVENTS,
+  CONDITION_LABEL,
   applyConditionEvent,
+  temperamentOf,
   applyRaceFatigue,
   blankCondition,
   recoverBetweenRounds,
@@ -1090,6 +1094,12 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
             blankCondition(result.demotedDriverId),
           'RESULT_POOR',
           1.4,
+          {
+            temperament: temperamentOf(effectiveDriver(next, result.demotedDriverId)),
+            season: next.season,
+            round: next.round,
+            label: `Dropped to reserve for ${promoted}`,
+          },
         );
       }
       break;
@@ -1115,6 +1125,12 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         next.driverConditions[event.driverId] ?? blankCondition(event.driverId),
         'RESULT_TERRIBLE',
         1.2,
+        {
+          temperament: temperamentOf(effectiveDriver(next, event.driverId)),
+          season: next.season,
+          round: next.round,
+          label: 'Benched — taken out of the car',
+        },
       );
       break;
     }
@@ -1363,6 +1379,12 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         next.driverConditions[event.driverId] ?? blankCondition(event.driverId),
         'RESULT_GOOD',
         1.2,
+        {
+          temperament: temperamentOf(effectiveDriver(next, event.driverId)),
+          season: next.season,
+          round: next.round,
+          label: 'Signed a new contract',
+        },
       );
 
       announceContract(next, event.driverId, event.salary, event.seasons);
@@ -1666,25 +1688,45 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         if (!condition) continue;
 
         let updated = condition;
+        const temperament = temperamentOf(effectiveDriver(next, entry.driverId));
+
+        /* How hard any of this lands is the driver's own business: a
+         * volatile driver leaves Saturday transformed, a phlegmatic one
+         * barely notices. */
+        const feels = { temperament, season: next.season, round: next.round };
 
         const mate = entries.find(
           (other) => other.teamId === entry.teamId && other.driverId !== entry.driverId,
         );
         if (mate) {
+          const ahead = entry.position < mate.position;
+          const mateName = DRIVER_BY_ID[mate.driverId]?.lastName ?? 'his team-mate';
           updated = applyConditionEvent(
             updated,
-            entry.position < mate.position ? 'OUT_QUALIFIED_MATE' : 'BEATEN_BY_MATE',
+            ahead ? 'OUT_QUALIFIED_MATE' : 'BEATEN_BY_MATE',
             // A thrashing hurts more than being pipped.
             Math.min(1.6, 0.6 + Math.abs(entry.position - mate.position) * 0.18),
+            {
+              ...feels,
+              label: ahead
+                ? `Out-qualified ${mateName}, P${entry.position} to P${mate.position}`
+                : `Out-qualified by ${mateName}, P${mate.position} to P${entry.position}`,
+            },
           );
         }
 
         /* And where they ended up on the grid in absolute terms — the
          * front row lifts anybody, the back of it deflates anybody. */
         if (entry.position <= 3) {
-          updated = applyConditionEvent(updated, 'QUALIFIED_WELL', entry.position === 1 ? 1.4 : 1);
+          updated = applyConditionEvent(updated, 'QUALIFIED_WELL', entry.position === 1 ? 1.4 : 1, {
+            ...feels,
+            label: entry.position === 1 ? 'Took pole position' : `Qualified P${entry.position}`,
+          });
         } else if (entry.position >= entries.length - 4) {
-          updated = applyConditionEvent(updated, 'QUALIFIED_POORLY');
+          updated = applyConditionEvent(updated, 'QUALIFIED_POORLY', 1, {
+            ...feels,
+            label: `Qualified P${entry.position} — near the back`,
+          });
         }
 
         next.driverConditions[entry.driverId] = updated;
@@ -1737,6 +1779,13 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
       next.driverConditions[event.driverId] = applyConditionEvent(
         condition,
         event.event as ConditionEvent,
+        1,
+        {
+          temperament: temperamentOf(effectiveDriver(next, event.driverId)),
+          season: next.season,
+          round: next.round,
+          label: CONDITION_LABEL[event.event as ConditionEvent],
+        },
       );
       break;
     }
@@ -1934,21 +1983,54 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         if (!condition) continue;
 
         let updated = condition;
+        const feels = {
+          temperament: temperamentOf(effectiveDriver(next, finish.driverId)),
+          season: next.season,
+          round: next.round,
+        };
 
         if (finish.status === 'DNF') {
-          updated = applyConditionEvent(updated, 'MECHANICAL_FAILURE');
+          updated = applyConditionEvent(updated, 'MECHANICAL_FAILURE', 1, {
+            ...feels,
+            label: 'Retired — the car let him down',
+          });
         } else {
           const gained = finish.gridPosition - finish.position;
           const podium = finish.position <= 3;
+          const move =
+            gained > 0 ? ` (up ${gained} from P${finish.gridPosition})`
+            : gained < 0 ? ` (down ${-gained} from P${finish.gridPosition})`
+            : '';
 
           if (podium || gained >= 5) {
-            updated = applyConditionEvent(updated, 'RESULT_EXCELLENT');
+            updated = applyConditionEvent(updated, 'RESULT_EXCELLENT', 1, {
+              ...feels,
+              label: podium ? `Podium — P${finish.position}${move}` : `Charged to P${finish.position}${move}`,
+            });
           } else if (finish.points > 0 || gained >= 2) {
-            updated = applyConditionEvent(updated, 'RESULT_GOOD');
+            updated = applyConditionEvent(updated, 'RESULT_GOOD', 1, {
+              ...feels,
+              label: `P${finish.position}${move} — points on the board`,
+            });
           } else if (gained <= -5) {
-            updated = applyConditionEvent(updated, 'RESULT_TERRIBLE');
+            updated = applyConditionEvent(updated, 'RESULT_TERRIBLE', 1, {
+              ...feels,
+              label: `Went backwards to P${finish.position}${move}`,
+            });
           } else if (gained < 0) {
-            updated = applyConditionEvent(updated, 'RESULT_POOR');
+            updated = applyConditionEvent(updated, 'RESULT_POOR', 1, {
+              ...feels,
+              label: `P${finish.position}${move} — nothing to show for it`,
+            });
+          } else {
+            /* Finished exactly where they started, out of the points. It
+             * is not a disaster and it is not nothing: an afternoon that
+             * changed nothing still wears on somebody, and leaving it
+             * unrecorded gave half the grid an empty week every week. */
+            updated = applyConditionEvent(updated, 'RESULT_POOR', 0.45, {
+              ...feels,
+              label: `P${finish.position} — a weekend that went nowhere`,
+            });
           }
         }
 
@@ -2022,23 +2104,11 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
 
         /* A part that has reached the end is still on the car — a team
          * does not race without a floor — but it is giving back the
-         * least it ever will, and the player is told so plainly. */
-        if (worn.length > 0 && team.teamId === next.playerTeamId) {
-          postMail(next, {
-            category: 'RND',
-            from: 'Chief Mechanic',
-            subject: `${worn.length} part${worn.length === 1 ? '' : 's'} at the end of life`,
-            importance: 'HIGH',
-            body:
-              worn
-                .map(
-                  (part) =>
-                    `• ${PART_BY_ID.get(part.category)?.label ?? part.category} — ${Math.round(part.mileageLaps)} laps, finished.`,
-                )
-                .join('\n') +
-              `\n\nThey will keep running, but they are giving back the least they ever will. Build replacements in the garage — they will be made to whatever the drawings say now, so anything R&D has landed since goes straight onto the car.`,
-          });
-        }
+         * least it ever will. The drivers raise it themselves, in their
+         * own words and about their own car; the mechanic's log is the
+         * complete picture underneath. */
+        driverGarageMail(next, team, worn);
+        mechanicSummary(next, team, worn);
 
         refreshCar(team);
       }

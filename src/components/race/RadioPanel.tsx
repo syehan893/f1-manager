@@ -181,6 +181,7 @@ function DriverState({ driverId }: { driverId: string }) {
   const condition = conditionOf(state, driverId);
   const emotion = emotionOf(condition);
   const tone = EMOTION_TONE[emotion];
+  const recent = (condition.recent ?? []).slice(0, 2);
 
   const bars = [
     { label: 'Mood', value: condition.mood, tone: 'var(--color-neon-lime)', good: 'high' },
@@ -228,6 +229,38 @@ function DriverState({ driverId }: { driverId: string }) {
           </div>
         ))}
       </div>
+
+      {/* Why they are where they are. Three bars with no cause behind
+          them read as sliders; the last two things that moved him are
+          what turn the numbers back into a person having a weekend. */}
+      {recent.length > 0 && (
+        <ul className="mt-2 grid gap-0.5 border-t border-carbon-700/70 pt-1.5">
+          {recent.map((note, index) => {
+            const net = note.mood - note.stress + note.morale;
+            return (
+              <li
+                key={`${note.round}-${note.label}-${index}`}
+                className="flex items-center gap-1.5"
+              >
+                <span
+                  className="size-1 shrink-0 rounded-full"
+                  style={{
+                    background:
+                      net > 1
+                        ? 'var(--color-neon-lime)'
+                        : net < -1
+                          ? 'var(--color-neon-red)'
+                          : 'var(--color-chrome-600)',
+                  }}
+                />
+                <span className="min-w-0 flex-1 truncate text-[9px] text-chrome-500">
+                  {note.label}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
 
       {/* The pit wall speaking first. */}
       <div className="mt-2 grid grid-cols-4 gap-1">

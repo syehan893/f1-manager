@@ -1,4 +1,5 @@
 import type { DriverCondition, DriverEmotion, GameState } from './types';
+import type { Driver } from '@/types';
 
 /* =====================================================================
  * Driver condition.
@@ -197,11 +198,135 @@ export const CONDITION_EVENTS = {
 
 export type ConditionEvent = keyof typeof CONDITION_EVENTS;
 
-/** Apply one event. Returns a new condition; never mutates. */
+/* ---------------------------- temperament ------------------------------ */
+
+/**
+ * How one particular driver takes things.
+ *
+ * The same result does not land the same way on two people, and until
+ * now it did: every driver moved by the same number, which is what made
+ * mood and stress read as sliders rather than as anybody's actual state.
+ *
+ *   volatility  how far they swing. A volatile driver is euphoric and
+ *               inconsolable in the same afternoon.
+ *   resilience  how much of a bad day they shrug off. High resilience
+ *               takes the edge off everything negative.
+ *   ego         how much being beaten by the team-mate specifically
+ *               stings, over and above the result itself.
+ */
+export interface Temperament {
+  volatility: number;
+  resilience: number;
+  ego: number;
+}
+
+function seeded(key: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < key.length; i++) {
+    hash ^= key.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 4294967296;
+}
+
+/**
+ * Two thirds from who they are, one third fixed to them for life.
+ *
+ * Consistency and stamina are the closest the attribute set has to
+ * composure, so they carry most of it — a driver who can repeat a lap
+ * under pressure is the same driver who does not fall apart after a bad
+ * Saturday. The rest is temperament proper: some people are simply more
+ * dramatic than their lap times suggest, and it never changes.
+ */
+export function temperamentOf(driver: Driver | undefined): Temperament {
+  if (!driver) return { volatility: 1, resilience: 1, ego: 1 };
+
+  const { consistency, stamina, attack } = driver.attributes;
+  const composure = (consistency + stamina) / 2;
+  const streak = seeded(driver.id);
+
+  /* All three are centred on 1 at a composure of 70, so an average
+   * driver is the neutral case and the spread runs both ways. Centring
+   * resilience on the 0-100 scale instead left every driver above 1 —
+   * everybody shrugged everything off a bit, and nobody was fragile. */
+  return {
+    volatility: clampFactor(1 + (70 - composure) / 90 + (streak - 0.5) * 0.5),
+    resilience: clampFactor(1 + (composure - 70) / 110 + (streak - 0.5) * 0.3),
+    ego: clampFactor(1 + (attack - 70) / 110 + (seeded(driver.id + ':ego') - 0.5) * 0.4),
+  };
+}
+
+const clampFactor = (value: number) => Math.max(0.55, Math.min(1.6, Math.round(value * 100) / 100));
+
+/** Events a resilient driver is allowed to shrug off. */
+const NEGATIVE_EVENTS = new Set<ConditionEvent>([
+  'BEATEN_BY_MATE',
+  'QUALIFIED_POORLY',
+  'OVERTAKEN',
+  'STUCK_IN_TRAFFIC',
+  'TYRES_GONE',
+  'REQUEST_REFUSED',
+  'MECHANICAL_FAILURE',
+  'RESULT_POOR',
+  'RESULT_TERRIBLE',
+]);
+
+/** Context that makes an event land as one person's rather than anyone's. */
+export interface ConditionContext {
+  temperament?: Temperament;
+  /** What happened, in the driver's own terms, for the reason trail. */
+  label?: string;
+  season?: number;
+  round?: number;
+}
+
+/**
+ * What each event was, in the words the driver would use.
+ *
+ * The reason trail is only worth keeping if it reads like an afternoon
+ * rather than like an enum, so every event that can reach a driver has a
+ * sentence here. Results and qualifying supply their own, because those
+ * carry positions the table cannot know.
+ */
+export const CONDITION_LABEL: Record<ConditionEvent, string> = {
+  OUT_QUALIFIED_MATE: 'Beat his team-mate in qualifying',
+  BEATEN_BY_MATE: 'Out-qualified by his team-mate',
+  QUALIFIED_WELL: 'A strong qualifying',
+  QUALIFIED_POORLY: 'A poor qualifying',
+  OVERTAKE_MADE: 'Made a move stick',
+  OVERTAKEN: 'Lost a place on track',
+  STUCK_IN_TRAFFIC: 'Stuck behind a slower car',
+  TYRES_GONE: 'Ran out of tyre',
+  REQUEST_GRANTED: 'The pit wall backed his call',
+  REQUEST_REFUSED: 'The pit wall turned him down',
+  REASSURED: 'Talked down over the radio',
+  ORDERED_TO_PUSH: 'Told to push',
+  TOLD_TO_HOLD: 'Told to hold station',
+  PRAISED: 'Praised over the radio',
+  MECHANICAL_FAILURE: 'The car let him down',
+  RESULT_EXCELLENT: 'A big result',
+  RESULT_GOOD: 'A good afternoon',
+  RESULT_POOR: 'A disappointing result',
+  RESULT_TERRIBLE: 'A bad day',
+};
+
+/** Newest first, and this is the cap — a memory, not a diary. */
+export const CONDITION_MEMORY = 6;
+
+/**
+ * Apply one event. Returns a new condition; never mutates.
+ *
+ * Two things make this more than arithmetic. The driver's temperament
+ * decides how far it moves them, so the same podium lifts one driver
+ * twice as much as their team-mate. And the reason is written down, so
+ * the number on the screen can be traced back to the afternoon that
+ * produced it instead of drifting silently.
+ */
 export function applyConditionEvent(
   condition: DriverCondition,
   event: ConditionEvent,
   scale = 1,
+  context: ConditionContext = {},
 ): DriverCondition {
   const delta = CONDITION_EVENTS[event] as {
     mood?: number;
@@ -209,11 +334,39 @@ export function applyConditionEvent(
     morale?: number;
   };
 
+  const { volatility = 1, resilience = 1, ego = 1 } = context.temperament ?? {};
+
+  /* Everything is amplified by how dramatic they are; the bad things are
+   * then taken back down by how much they let slide. Being beaten by the
+   * team-mate is the one that scales with ego rather than with either. */
+  let factor = scale * volatility;
+  if (NEGATIVE_EVENTS.has(event)) factor /= resilience;
+  if (event === 'BEATEN_BY_MATE' || event === 'OUT_QUALIFIED_MATE') factor *= ego;
+
+  const mood = (delta.mood ?? 0) * factor;
+  const stress = (delta.stress ?? 0) * factor;
+  const morale = (delta.morale ?? 0) * factor;
+
+  const recent = context.label
+    ? [
+        {
+          season: context.season ?? 0,
+          round: context.round ?? 0,
+          label: context.label,
+          mood: Math.round(mood * 10) / 10,
+          stress: Math.round(stress * 10) / 10,
+          morale: Math.round(morale * 10) / 10,
+        },
+        ...(condition.recent ?? []),
+      ].slice(0, CONDITION_MEMORY)
+    : condition.recent;
+
   return {
     ...condition,
-    mood: clamp(condition.mood + (delta.mood ?? 0) * scale),
-    stress: clamp(condition.stress + (delta.stress ?? 0) * scale),
-    morale: clamp(condition.morale + (delta.morale ?? 0) * scale),
+    mood: clamp(condition.mood + mood),
+    stress: clamp(condition.stress + stress),
+    morale: clamp(condition.morale + morale),
+    ...(recent ? { recent } : {}),
   };
 }
 

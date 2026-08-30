@@ -104,6 +104,9 @@ const REFUSAL_MARGIN = 0.14;
 const SETTLING_LAPS = 1;
 /** Sustained time in range before an attack call is worth making. */
 const ATTACK_PATIENCE_MS = 9_000;
+
+/** Repeat the same call inside this and the driver treats it as nagging. */
+const REPEAT_CALL_MS = 90_000;
 /** Tyre wear above which a driver will not ask to push at all. */
 const PUSH_ASK_TYRE_LIMIT = 72;
 /** Energy below which the override is not worth asking for. */
@@ -173,6 +176,16 @@ interface DriverMemory {
   /** Reference lap time from the opening clean laps. */
   referenceLapMs: number | null;
   lastLapSeen: number;
+  /**
+   * The last thing the pit wall said to them, and when.
+   *
+   * A driver notices being told the same thing twice. Without this the
+   * console is four buttons that each move a number by a fixed amount
+   * however often they are pressed, which is what makes the whole thing
+   * feel like editing a stat rather than talking to somebody.
+   */
+  lastCall: PitWallCall | null;
+  lastCallAtMs: number;
 }
 
 /* ------------------------------ helpers ------------------------------ */
@@ -319,6 +332,33 @@ const PRAISE_REPLY: readonly string[] = [
   'Appreciate that. Let us finish the job.',
   'Cheers. Feeling good about this one.',
 ];
+
+/* A call can be the wrong call. Being told to calm down when you are
+ * already calm is patronising; being told to attack when you are barely
+ * holding the car is the pit wall not listening. Both get said back. */
+const REASSURE_WASTED = [
+  'I am fine. Honestly — save the radio for when I am not.',
+  'Copy, but I am not the problem right now.',
+  'Understood. I would rather have the lap time than the pep talk.',
+] as const;
+
+const DEMAND_BACKFIRE = [
+  'I am already at the limit! What exactly do you want from me?',
+  'There is nothing more — you are asking me to bin it.',
+  'I hear you, but that is not going to end the way you want.',
+] as const;
+
+const SETTLE_RESENTED = [
+  'Now? I have got him. Let me race.',
+  'Copy... though I think that is the wrong call.',
+  'If you say so. I was quicker than that.',
+] as const;
+
+const REPEATED_CALL = [
+  'Yes — you said. Same answer.',
+  'Copy, second time. Nothing has changed at my end.',
+  'I heard you the first time.',
+] as const;
 
 const HOLD_STATION = [
   'Copy, holding station.',
@@ -515,6 +555,8 @@ export function createRadioBrain(options: RadioBrainOptions): RadioBrain {
     const driver = byId.get(driverId);
     if (!driver) return null;
     const fresh: DriverMemory = {
+      lastCall: null,
+      lastCallAtMs: -Infinity,
       temperament: temperamentOf(driver),
       voice: memory.size,
       lastSpokeAtMs: -Infinity,
@@ -995,22 +1037,43 @@ export function createRadioBrain(options: RadioBrainOptions): RadioBrain {
     mem.lastSpokeAtMs = state.elapsedMs;
     const emotion = emotionFor(driverId);
 
+    /* Saying the same thing twice inside a couple of minutes is not a
+     * second dose, it is nagging — and the driver says so rather than
+     * quietly banking another stat change. */
+    const repeated =
+      mem.lastCall === pitCall && state.elapsedMs - mem.lastCallAtMs < REPEAT_CALL_MS;
+    mem.lastCall = pitCall;
+    mem.lastCallAtMs = state.elapsedMs;
+
+    if (repeated) {
+      return make(car, state, 'ACK', 'INFO', pickFor(rng, REPEATED_CALL, mem.voice));
+    }
+
+    const rattled = emotion === 'RATTLED' || emotion === 'DEJECTED';
+    const settled = emotion === 'CONFIDENT' || emotion === 'FOCUSED';
+
     switch (pitCall) {
       case 'REASSURE': {
+        /* The right tool for a driver who is coming apart, and wasted
+         * breath on one who is not — they would rather have the silence. */
+        if (settled) {
+          report(driverId, 'STUCK_IN_TRAFFIC');
+          return make(car, state, 'ACK', 'INFO', pickFor(rng, REASSURE_WASTED, mem.voice));
+        }
         report(driverId, 'REASSURED');
         const pool = REASSURE_REPLY[emotion] ?? REASSURE_REPLY.DEFAULT!;
         return make(car, state, 'ACK', 'INFO', pickFor(rng, pool, mem.voice));
       }
       case 'DEMAND': {
+        /* Asking a driver who is already over their head for more is how
+         * a car ends up in the wall, and they will tell you so. */
+        if (rattled) {
+          report(driverId, 'REQUEST_REFUSED');
+          return make(car, state, 'ACK', 'URGENT', pickFor(rng, DEMAND_BACKFIRE, mem.voice));
+        }
         report(driverId, 'ORDERED_TO_PUSH');
         const pool = DEMAND_REPLY[emotion] ?? DEMAND_REPLY.DEFAULT!;
-        return make(
-          car,
-          state,
-          'ACK',
-          emotion === 'RATTLED' ? 'URGENT' : 'INFO',
-          pickFor(rng, pool, mem.voice),
-        );
+        return make(car, state, 'ACK', 'INFO', pickFor(rng, pool, mem.voice));
       }
       case 'PRAISE': {
         report(driverId, 'PRAISED');
@@ -1018,6 +1081,12 @@ export function createRadioBrain(options: RadioBrainOptions): RadioBrain {
       }
       case 'CALM_DOWN':
       default: {
+        /* Telling somebody who is on a charge to bring it home is a
+         * decision, and it costs you something with them. */
+        if (emotion === 'FIRED_UP') {
+          report(driverId, 'REQUEST_REFUSED');
+          return make(car, state, 'ACK', 'INFO', pickFor(rng, SETTLE_RESENTED, mem.voice));
+        }
         report(driverId, 'TOLD_TO_HOLD');
         return make(car, state, 'ACK', 'INFO', pickFor(rng, HOLD_STATION, mem.voice));
       }

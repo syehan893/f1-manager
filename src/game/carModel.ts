@@ -400,12 +400,19 @@ export function wearFittedParts(
 
     const life = PART_BY_ID.get(part.category)?.lifeRounds ?? 5;
     const hands = driverWear[part.carIndex] ?? 1;
+    const before = part.healthPct;
+
     part.mileageLaps += laps;
     part.healthPct = Math.max(
       0,
       Math.round((part.healthPct - (100 / life) * distance * hands) * 10) / 10,
     );
-    if (part.healthPct <= 0) worn.push(part);
+
+    /* Only the weekend it actually goes. A part that is already finished
+     * is still finished next week, and reporting it again every race
+     * would have the drivers writing the same letter until somebody
+     * replaced it. */
+    if (before > 0 && part.healthPct <= 0) worn.push(part);
   }
 
   return worn;

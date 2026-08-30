@@ -366,6 +366,49 @@ export function DriversView() {
                     value={condition.fitness}
                     color="var(--color-neon-blue)"
                   />
+
+                  {/* What put him here. Four bars with no history behind
+                      them are a readout; the afternoons that moved them
+                      are what make it somebody's season. */}
+                  {(condition.recent ?? []).length > 0 && (
+                    <div className="border-t border-carbon-700/70 pt-2.5">
+                      <p className="mb-1.5 text-[8.5px] tracking-widest text-chrome-600 uppercase">
+                        What moved him
+                      </p>
+                      <ul className="grid gap-1">
+                        {(condition.recent ?? []).map((note, index) => {
+                          const net = note.mood - note.stress + note.morale;
+                          const shade =
+                            net > 1
+                              ? 'var(--color-neon-lime)'
+                              : net < -1
+                                ? 'var(--color-neon-red)'
+                                : 'var(--color-chrome-500)';
+                          return (
+                            <li
+                              key={`${note.season}-${note.round}-${index}`}
+                              className="flex items-start gap-1.5"
+                            >
+                              <span
+                                className="mt-1 size-1.5 shrink-0 rounded-full"
+                                style={{ background: shade }}
+                              />
+                              <span className="min-w-0 flex-1">
+                                <span className="block text-[10px] leading-snug text-chrome-300">
+                                  {note.label}
+                                </span>
+                                <span className="block font-mono text-[8.5px] text-chrome-600">
+                                  R{note.round} · mood {note.mood >= 0 ? '+' : ''}
+                                  {note.mood.toFixed(0)} · stress {note.stress >= 0 ? '+' : ''}
+                                  {note.stress.toFixed(0)}
+                                </span>
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  )}
                   <StatBar
                     label="Overall rating"
                     value={driverRating(selected)}
