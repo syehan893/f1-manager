@@ -2,6 +2,7 @@ import { GRID_2026_TEAMS } from '@/data/grid2026';
 import { profileFor } from './difficulty';
 import {
   ASSEMBLY_PARTS,
+  CARS_PER_TEAM,
   ENGINE_ALLOCATION,
   buildPart,
   buildPowerUnit,
@@ -199,27 +200,36 @@ export function developAiCars(state: GameState, weeksElapsed = 2): AiDevelopment
      * A team that cannot afford the replacement races the worn part,
      * which is how a well-run budget turns into lap time. */
     let replaced = false;
-    for (const category of ASSEMBLY_PARTS) {
-      const fitted = fittedPart(team, category);
-      if (!fitted || fitted.healthPct > AI_REBUILD_THRESHOLD) continue;
+    for (let carIndex = 0; carIndex < CARS_PER_TEAM; carIndex++) {
+      for (const category of ASSEMBLY_PARTS) {
+        const fitted = fittedPart(team, category, carIndex);
+        if (!fitted || fitted.healthPct > AI_REBUILD_THRESHOLD) continue;
 
-      const spare = sparePartsOf(team, category)[0];
-      if (spare && spare.healthPct > fitted.healthPct + 20) {
+        const spare = sparePartsOf(team, category)[0];
+        if (spare && spare.healthPct > fitted.healthPct + 20) {
+          fitted.status = fitted.healthPct <= 0 ? 'RETIRED' : 'POOL';
+          spare.status = 'FITTED';
+          spare.carIndex = carIndex;
+          replaced = true;
+          continue;
+        }
+
+        const cost = partBuildCost(team, category, state.season);
+        if (team.budget < cost * 2) continue;
+
+        const fresh = buildPart(
+          team,
+          category,
+          state.season,
+          team.builtParts.length,
+          carIndex,
+        );
+        team.budget -= cost;
         fitted.status = fitted.healthPct <= 0 ? 'RETIRED' : 'POOL';
-        spare.status = 'FITTED';
+        fresh.status = 'FITTED';
+        team.builtParts = [...team.builtParts, fresh];
         replaced = true;
-        continue;
       }
-
-      const cost = partBuildCost(team, category, state.season);
-      if (team.budget < cost * 2) continue;
-
-      const fresh = buildPart(team, category, state.season, team.builtParts.length);
-      team.budget -= cost;
-      fitted.status = fitted.healthPct <= 0 ? 'RETIRED' : 'POOL';
-      fresh.status = 'FITTED';
-      team.builtParts = [...team.builtParts, fresh];
-      replaced = true;
     }
     if (replaced) refreshCar(team);
 

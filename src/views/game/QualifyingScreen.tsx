@@ -9,6 +9,7 @@ import { simulatorEdge } from '@/game/facilities';
 import { staffQualifyingEdge } from '@/game/staffing';
 import { gridTeamOf } from '@/data/grid2026';
 import { cx, flagEmoji, formatLapTime } from '@/lib/format';
+import { statsForDriver } from '@/game/roster';
 import { useGame } from '@/state/gameContext';
 
 
@@ -46,6 +47,11 @@ export function QualifyingScreen() {
       // the simulator is the player's own answer to it.
       playerTeamId: state.playerTeamId,
       playerQualifyingEdge: simulatorEdge(state) + staffQualifyingEdge(state),
+      /* Each driver is timed in their own car, not the constructor's
+       * average of two — by mid-season those are different machines. */
+      carStats: Object.fromEntries(
+        gridRoster.map((driver) => [driver.id, statsForDriver(state, driver.id)]),
+      ),
     });
 
     dispatch({ type: 'QUALIFYING_COMPLETE', result: session });

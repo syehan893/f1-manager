@@ -265,30 +265,57 @@ export function partHealthFactor(healthPct: number): number {
   return WORN_PART_FLOOR + (health / 100) * (1 - WORN_PART_FLOOR);
 }
 
-/** The part of this category currently bolted to the car. */
-export function fittedPart(team: TeamSeasonState, category: PartCategory): BuiltPart | null {
+/** Cars a team enters, and therefore garages it runs. */
+export const CARS_PER_TEAM = 2;
+
+/** The part of this category bolted to one particular car. */
+export function fittedPart(
+  team: TeamSeasonState,
+  category: PartCategory,
+  carIndex: number,
+): BuiltPart | null {
   return (
     (team.builtParts ?? []).find(
-      (part) => part.category === category && part.status === 'FITTED',
+      (part) =>
+        part.category === category &&
+        part.carIndex === carIndex &&
+        part.status === 'FITTED',
     ) ?? null
   );
 }
 
-/** Built parts of a category still worth fitting, freshest first. */
+/**
+ * Spares of a category, freshest first.
+ *
+ * A spare belongs to the garage rather than to one car: a wing built for
+ * the first car can be bolted to the second, which is what makes a spare
+ * worth having at all.
+ */
 export function sparePartsOf(team: TeamSeasonState, category: PartCategory): BuiltPart[] {
   return (team.builtParts ?? [])
     .filter((part) => part.category === category && part.status === 'POOL')
     .sort((a, b) => b.healthPct - a.healthPct || b.spec - a.spec);
 }
 
-/** Builds of this category used against the season's allowance. */
+/**
+ * Builds of this category used against the season's allowance.
+ *
+ * The allowance is the team's, not the car's — the regulations count
+ * parts made, and a wing is a wing whichever side of the garage it ends
+ * up on. Two cars therefore compete for one budget of builds, which is
+ * the decision the screen is asking the player to make.
+ */
 export function buildsUsed(
   team: TeamSeasonState,
   category: PartCategory,
   season: number,
 ): number {
   return (team.builtParts ?? []).filter(
-    (part) => part.category === category && part.builtInSeason === season,
+    (part) =>
+      part.category === category &&
+      part.builtInSeason === season &&
+      // The car as homologated is not a build out of the allowance.
+      !part.homologated,
   ).length;
 }
 
@@ -332,10 +359,12 @@ export function buildPart(
   category: PartCategory,
   season: number,
   serial: number,
+  carIndex = 0,
 ): BuiltPart {
   return {
     id: `part-${category.toLowerCase()}-${season}-${serial}`,
     category,
+    carIndex,
     builtInSeason: season,
     spec: levelOf(team.parts, category),
     mileageLaps: 0,
@@ -356,6 +385,12 @@ export function wearFittedParts(
   team: TeamSeasonState,
   laps: number,
   raceLengthPct: number,
+  /**
+   * Per-car multiplier on wear, from whoever is driving it. Index 0 and
+   * 1; anything missing is treated as an average driver. This is why two
+   * cars built the same weekend need rebuilding at different times.
+   */
+  driverWear: number[] = [],
 ): BuiltPart[] {
   const worn: BuiltPart[] = [];
   const distance = 0.7 + (Math.max(25, Math.min(100, raceLengthPct)) / 100) * 0.3;
@@ -364,8 +399,12 @@ export function wearFittedParts(
     if (part.status !== 'FITTED') continue;
 
     const life = PART_BY_ID.get(part.category)?.lifeRounds ?? 5;
+    const hands = driverWear[part.carIndex] ?? 1;
     part.mileageLaps += laps;
-    part.healthPct = Math.max(0, Math.round((part.healthPct - (100 / life) * distance) * 10) / 10);
+    part.healthPct = Math.max(
+      0,
+      Math.round((part.healthPct - (100 / life) * distance * hands) * 10) / 10,
+    );
     if (part.healthPct <= 0) worn.push(part);
   }
 
@@ -400,6 +439,11 @@ export function syncPartsToDrawings(team: TeamSeasonState): boolean {
   return changed;
 }
 
+/** Whether a part is one of the five that make up a power unit. */
+export function isPowerUnitPart(category: PartCategory): boolean {
+  return POWER_UNIT_PARTS.includes(category);
+}
+
 /**
  * A full set of fresh parts at the current drawing, all fitted.
  *
@@ -407,10 +451,20 @@ export function syncPartsToDrawings(team: TeamSeasonState): boolean {
  * an existing save that has never had an inventory.
  */
 export function buildFullSet(team: TeamSeasonState, season: number): BuiltPart[] {
-  return ASSEMBLY_PARTS.map((category, index) => ({
-    ...buildPart(team, category, season, index),
-    status: 'FITTED' as const,
-  }));
+  const set: BuiltPart[] = [];
+
+  for (let carIndex = 0; carIndex < CARS_PER_TEAM; carIndex++) {
+    for (const [index, category] of ASSEMBLY_PARTS.entries()) {
+      set.push({
+        ...buildPart(team, category, season, carIndex * ASSEMBLY_PARTS.length + index, carIndex),
+        status: 'FITTED' as const,
+        // The car as homologated, not something built out of the allowance.
+        homologated: true,
+      });
+    }
+  }
+
+  return set;
 }
 
 /* --------------------------- how stats derive -------------------------- */
@@ -496,12 +550,15 @@ export function engineHealthFactor(unit: PowerUnitState | null): number {
 function effectiveLevels(
   parts: PartState[],
   builtParts: BuiltPart[] | undefined,
+  carIndex: number,
 ): PartState[] {
   if (!builtParts || builtParts.length === 0) return parts;
 
   const fitted = new Map<PartCategory, BuiltPart>();
   for (const part of builtParts) {
-    if (part.status === 'FITTED') fitted.set(part.category, part);
+    if (part.status === 'FITTED' && part.carIndex === carIndex) {
+      fitted.set(part.category, part);
+    }
   }
   if (fitted.size === 0) return parts;
 
@@ -521,9 +578,10 @@ export function assembleCar(
   fittedUnit: PowerUnitState | null,
   pitCrew: number,
   builtParts?: BuiltPart[],
+  carIndex = 0,
 ): CarStats {
   const health = engineHealthFactor(fittedUnit);
-  const parts = effectiveLevels(designParts, builtParts);
+  const parts = effectiveLevels(designParts, builtParts, carIndex);
 
   /* A tired unit costs power and energy directly, and reliability by
    * rather more — it is the wear itself that strands the car. */
@@ -666,5 +724,35 @@ export function unitSpecRating(unit: PowerUnitState): number {
  * stale and nothing downstream has to know parts exist.
  */
 export function refreshCar(team: TeamSeasonState): void {
-  team.car = assembleCar(team.parts, fittedUnit(team), team.car.pitCrew, team.builtParts);
+  const unit = fittedUnit(team);
+
+  /* Each car is assembled from its own parts. Two cars on the same
+   * drawings drift apart as the season goes on, because they are worn by
+   * two different drivers and rebuilt at two different moments. */
+  team.cars = Array.from({ length: CARS_PER_TEAM }, (_, carIndex) =>
+    assembleCar(team.parts, unit, team.car.pitCrew, team.builtParts, carIndex),
+  );
+
+  /* The team's headline figure is the average of its two cars. Every
+   * table that ranks constructors rather than cars reads this, and a
+   * team is fairly described by what it actually puts on track. */
+  const mean = (key: keyof CarStats) =>
+    team.cars.reduce((sum, car) => sum + car[key], 0) / team.cars.length;
+
+  team.car = {
+    pace: mean('pace'),
+    aero: mean('aero'),
+    powerUnit: mean('powerUnit'),
+    electrical: mean('electrical'),
+    reliability: mean('reliability'),
+    pitCrew: mean('pitCrew'),
+    brakes: mean('brakes'),
+    suspension: mean('suspension'),
+    cooling: mean('cooling'),
+  };
+}
+
+/** One car's statistics, falling back to the team's when it has none. */
+export function carStatsOf(team: TeamSeasonState, carIndex: number): CarStats {
+  return team.cars?.[carIndex] ?? team.car;
 }

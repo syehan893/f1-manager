@@ -20,6 +20,7 @@ import { profileFor } from '../src/game/difficulty';
 import { blankStrategy } from '../src/game/machine';
 import {
   ASSEMBLY_PARTS,
+  CARS_PER_TEAM,
   PARTS,
   PART_BY_ID,
   buildsRemaining,
@@ -188,7 +189,7 @@ check(
     ...landing,
     teams: landing.teams.map((t) => ({ ...t, budget: 400_000_000 })),
   };
-  const madeIt = must(rich, { type: 'BUILD_PART', category: 'FLOOR' }, 'build a floor');
+  const madeIt = must(rich, { type: 'BUILD_PART', category: 'FLOOR', carIndex: 0 }, 'build a floor');
   const team = madeIt.teams.find((t) => t.teamId === 'williams')!;
 
   check(
@@ -2118,14 +2119,29 @@ console.log('\n== a car assembled from parts ==');
   const team = (s2: GameState) => s2.teams.find((t) => t.teamId === 'williams')!;
 
   check(
-    'the garage opens with a full set fitted',
-    team(g).builtParts.filter((p) => p.status === 'FITTED').length === ASSEMBLY_PARTS.length,
+    'the garage opens with a full set on each of the two cars',
+    team(g).builtParts.filter((p) => p.status === 'FITTED').length ===
+      ASSEMBLY_PARTS.length * CARS_PER_TEAM,
     `${team(g).builtParts.length} parts`,
   );
   check(
-    'every category can be built',
-    ASSEMBLY_PARTS.every((c) => transition(g, { type: 'BUILD_PART', category: c }).ok),
+    'each car has exactly one of every category fitted',
+    Array.from({ length: CARS_PER_TEAM }).every((_, carIndex) =>
+      ASSEMBLY_PARTS.every((c) => fittedPart(team(g), c, carIndex) !== null),
+    ),
+  );
+  check(
+    'every category can be built for either car',
+    ASSEMBLY_PARTS.every(
+      (c) =>
+        transition(g, { type: 'BUILD_PART', category: c, carIndex: 0 }).ok &&
+        transition(g, { type: 'BUILD_PART', category: c, carIndex: 1 }).ok,
+    ),
     `${ASSEMBLY_PARTS.length} categories`,
+  );
+  check(
+    'building for a car that does not exist is refused',
+    !transition(g, { type: 'BUILD_PART', category: 'FLOOR', carIndex: 2 }).ok,
   );
 
   /* Cost has to answer to the drawing: a better part is a dearer one. */
@@ -2141,7 +2157,7 @@ console.log('\n== a car assembled from parts ==');
   let spent = g;
   const allowance = PART_BY_ID.get('BRAKES')!.buildAllowance;
   for (let i = 0; i < allowance; i++) {
-    spent = must(spent, { type: 'BUILD_PART', category: 'BRAKES' }, `brake set ${i + 1}`);
+    spent = must(spent, { type: 'BUILD_PART', category: 'BRAKES', carIndex: 0 }, `brake set ${i + 1}`);
   }
   check(
     'the seasonal allowance is spent by building',
@@ -2153,7 +2169,7 @@ console.log('\n== a car assembled from parts ==');
   check('going beyond it costs more', rushedCost > withinCost, `${(withinCost / 1e6).toFixed(2)}M -> ${(rushedCost / 1e6).toFixed(2)}M`);
   check(
     'but is still allowed',
-    transition(spent, { type: 'BUILD_PART', category: 'BRAKES' }).ok,
+    transition(spent, { type: 'BUILD_PART', category: 'BRAKES', carIndex: 0 }).ok,
   );
 
   /* No money, no part. */
@@ -2161,20 +2177,26 @@ console.log('\n== a car assembled from parts ==');
     ...g,
     teams: g.teams.map((t) => (t.teamId === 'williams' ? { ...t, budget: 1_000 } : t)),
   };
-  const refused = transition(broke, { type: 'BUILD_PART', category: 'CHASSIS' });
+  const refused = transition(broke, { type: 'BUILD_PART', category: 'CHASSIS', carIndex: 0 });
   check('a build you cannot afford is refused', !refused.ok, refused.message ?? '');
 
   /* Fitting swaps, it does not duplicate. */
-  const made = must(g, { type: 'BUILD_PART', category: 'FLOOR' }, 'a floor');
+  const made = must(g, { type: 'BUILD_PART', category: 'FLOOR', carIndex: 0 }, 'a floor');
   const spare = sparePartsOf(team(made), 'FLOOR')[0]!;
-  const oldFloor = fittedPart(team(made), 'FLOOR')!;
-  const fittedNow = must(made, { type: 'FIT_PART', partId: spare.id }, 'fit it');
+  const oldFloor = fittedPart(team(made), 'FLOOR', 0)!;
+  const otherCarFloor = fittedPart(team(made), 'FLOOR', 1)!;
+  const fittedNow = must(made, { type: 'FIT_PART', partId: spare.id, carIndex: 0 }, 'fit it');
   check(
-    'exactly one part of a category is ever fitted',
-    team(fittedNow).builtParts.filter((p) => p.category === 'FLOOR' && p.status === 'FITTED')
-      .length === 1,
+    'exactly one part of a category is fitted per car',
+    team(fittedNow).builtParts.filter(
+      (p) => p.category === 'FLOOR' && p.status === 'FITTED' && p.carIndex === 0,
+    ).length === 1,
   );
-  check('the new one is on the car', fittedPart(team(fittedNow), 'FLOOR')!.id === spare.id);
+  check('the new one is on that car', fittedPart(team(fittedNow), 'FLOOR', 0)!.id === spare.id);
+  check(
+    'and the other car was left alone',
+    fittedPart(team(fittedNow), 'FLOOR', 1)!.id === otherCarFloor.id,
+  );
   check(
     'the old one is a spare, not scrap',
     sparePartsOf(team(fittedNow), 'FLOOR').some((p) => p.id === oldFloor.id),
@@ -2213,7 +2235,7 @@ console.log('\n== parts wear out ==');
   const order = Object.keys(g.driverTeams);
 
   const aeroFresh = team(g).car.aero;
-  const brakesFresh = fittedPart(team(g), 'BRAKES')!.healthPct;
+  const brakesFresh = fittedPart(team(g), 'BRAKES', 0)!.healthPct;
 
   /* Four weekends is more than a set of brakes lasts and less than a
    * chassis does — which is exactly the spread the system is for. */
@@ -2231,8 +2253,8 @@ console.log('\n== parts wear out ==');
     g = must(g, { type: 'CONTINUE_TO_NEXT_WEEK' }, `week ${round + 1}`);
   }
 
-  const brakes = fittedPart(team(g), 'BRAKES')!;
-  const chassis = fittedPart(team(g), 'CHASSIS')!;
+  const brakes = fittedPart(team(g), 'BRAKES', 0)!;
+  const chassis = fittedPart(team(g), 'CHASSIS', 0)!;
   check('a consumable part wears fast', brakes.healthPct < brakesFresh - 60, `brakes ${brakes.healthPct}%`);
   check('a long-life part wears slowly', chassis.healthPct > 55, `chassis ${chassis.healthPct}%`);
   check('mileage is recorded', brakes.mileageLaps >= 80, `${brakes.mileageLaps} laps`);
@@ -2248,7 +2270,7 @@ console.log('\n== parts wear out ==');
 
   /* Building and fitting a fresh one is the cure, and it has to be. */
   const rich: GameState = { ...g, teams: g.teams.map((t) => ({ ...t, budget: 400_000_000 })) };
-  const rebuilt = must(rich, { type: 'BUILD_PART', category: 'FRONT_WING' }, 'fresh wing');
+  const rebuilt = must(rich, { type: 'BUILD_PART', category: 'FRONT_WING', carIndex: 0 }, 'fresh wing');
   const fresh = sparePartsOf(team(rebuilt), 'FRONT_WING')[0]!;
   const fittedFresh = must(rebuilt, { type: 'FIT_PART', partId: fresh.id }, 'fit fresh wing');
   check(
@@ -2273,7 +2295,7 @@ console.log('\n== a new season resets the car ==');
 
   // Pile up engines and spares the way a season does.
   for (let i = 0; i < 5; i++) g = must(g, { type: 'BUILD_POWER_UNIT' }, `unit ${i + 1}`);
-  for (let i = 0; i < 3; i++) g = must(g, { type: 'BUILD_PART', category: 'FRONT_WING' }, `wing ${i + 1}`);
+  for (let i = 0; i < 3; i++) g = must(g, { type: 'BUILD_PART', category: 'FRONT_WING', carIndex: 0 }, `wing ${i + 1}`);
   check('units pile up during a season', team(g).powerUnits.length === 6, `${team(g).powerUnits.length}`);
   check('so do spares', sparePartsOf(team(g), 'FRONT_WING').length === 3);
 
@@ -2293,8 +2315,8 @@ console.log('\n== a new season resets the car ==');
   );
   check('and it is fresh and in the car', fittedUnit(team(g))?.healthPct === 100);
   check(
-    "the garage is a fresh full set, not last year's stock",
-    team(g).builtParts.length === ASSEMBLY_PARTS.length &&
+    "the garage is a fresh full set on both cars, not last year's stock",
+    team(g).builtParts.length === ASSEMBLY_PARTS.length * CARS_PER_TEAM &&
       team(g).builtParts.every((p) => p.status === 'FITTED' && p.healthPct === 100),
     `${team(g).builtParts.length} parts`,
   );

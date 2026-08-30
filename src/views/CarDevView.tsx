@@ -16,13 +16,16 @@ import { Panel } from '@/components/ui/Panel';
 import { Badge } from '@/components/ui/Badge';
 import { SegmentedControl } from '@/components/ui/SegmentedControl';
 import { GameButton } from '@/components/game/GameButton';
+import { DriverPortrait } from '@/components/ui/DriverPortrait';
 import { carRating, gridTeamOf } from '@/data/grid2026';
 import {
   ASSEMBLY_PARTS,
+  CARS_PER_TEAM,
   ENGINE_ALLOCATION,
   PART_BY_ID,
   POWER_UNIT_PARTS,
   buildsRemaining,
+  carStatsOf,
   enginePenaltyPlaces,
   fittedPart,
   fittedUnit,
@@ -33,28 +36,27 @@ import {
   unitSpecRating,
 } from '@/game/carModel';
 import { partLevel } from '@/game/partDevelopment';
+import { driverWearFactor } from '@/game/roster';
 import { PHILOSOPHY_BLURB, PHILOSOPHY_LABEL, philosophyFor } from '@/game/aiDevelopment';
 import { GROUP_META, levelTone } from '@/lib/partStyle';
 import { cx, formatCurrency } from '@/lib/format';
 import { useGame } from '@/state/gameContext';
-import type { BuiltPart, PartCategory } from '@/game/types';
+import type { BuiltPart, PartCategory, TeamSeasonState } from '@/game/types';
+import type { Driver } from '@/types';
 
 /* =====================================================================
- * The garage — steps two and three.
+ * The garage — two cars, one drawing office.
  *
- * R&D raises the drawing. This is where a drawing becomes an object and
- * an object goes onto the car:
+ * R&D raises a drawing and that drawing is the team's. Everything after
+ * it is per car: the factory builds a part for a specific car, the
+ * mechanics bolt it to that car, and it wears at the rate that car's
+ * driver sets. Two cars that left the winter identical are different
+ * machines by mid-season, and which one gets the next floor is a real
+ * decision because the build allowance is the team's and not the car's.
  *
- *   build   the factory makes one part to the current drawing, and its
- *           spec is frozen there — later development improves the next
- *           one, never this one
- *   fit     the mechanics bolt it on; whatever came off goes back on the
- *           shelf, or in the bin if it was finished
- *
- * Parts wear. A front wing is gone in three weekends and a chassis lasts
- * a season, which is what turns the build allowance into a plan: spend
- * it early on a car that is not ready yet, and there is nothing left in
- * the budget when the upgrade you were waiting for finally lands.
+ * One driver, one car: car 1 is the first name in the line-up, car 2 the
+ * second. Promoting a reserve changes who drives a car, never which
+ * parts are on it — a floor does not follow a driver out of the garage.
  * ===================================================================== */
 
 /** Health is the number the player actually reads on this screen. */
@@ -64,10 +66,15 @@ function healthTone(healthPct: number): string {
   return 'var(--color-neon-red)';
 }
 
-function HealthBar({ healthPct }: { healthPct: number }) {
+function HealthBar({ healthPct, thin }: { healthPct: number; thin?: boolean }) {
   const tone = healthTone(healthPct);
   return (
-    <div className="h-1.5 w-full overflow-hidden rounded-full bg-carbon-700">
+    <div
+      className={cx(
+        'w-full overflow-hidden rounded-full bg-carbon-700',
+        thin ? 'h-1' : 'h-1.5',
+      )}
+    >
       <motion.div
         className="h-full rounded-full"
         initial={false}
@@ -79,118 +86,85 @@ function HealthBar({ healthPct }: { healthPct: number }) {
   );
 }
 
-/** One spare on the shelf, with the two things you can do to it. */
-function SpareRow({ part }: { part: BuiltPart }) {
-  const { dispatch } = useGame();
-  return (
-    <li className="flex items-center gap-2 rounded-md border border-carbon-700 bg-carbon-950/40 px-2 py-1.5">
-      <span className="min-w-0 flex-1">
-        <span className="block font-mono text-[10px] text-chrome-300">
-          spec {part.spec.toFixed(1)} · {Math.round(part.healthPct)}% life
-        </span>
-        <span className="block font-mono text-[9px] text-chrome-600">
-          built {part.builtInSeason} · {Math.round(part.mileageLaps)} laps
-        </span>
-      </span>
-      <GameButton
-        size="sm"
-        variant="secondary"
-        onClick={() => dispatch({ type: 'FIT_PART', partId: part.id })}
-      >
-        Fit
-      </GameButton>
-      <button
-        type="button"
-        title="Scrap this spare"
-        onClick={() => dispatch({ type: 'SCRAP_PART', partId: part.id })}
-        className="rounded border border-carbon-600 p-1 text-chrome-500 transition-colors hover:border-neon-red/50 hover:text-neon-red"
-      >
-        <Trash2 className="size-3" />
-      </button>
-    </li>
-  );
+/** How many weekends this part has left in it, at this driver's rate. */
+function weekendsLeft(part: BuiltPart, wearFactor: number): number {
+  const life = PART_BY_ID.get(part.category)?.lifeRounds ?? 5;
+  const perWeekend = (100 / life) * wearFactor;
+  return perWeekend <= 0 ? 99 : Math.floor(part.healthPct / perWeekend);
 }
 
-/** One category: what is on the car, what is on the shelf, what a new one costs. */
-function GarageBay({ category }: { category: PartCategory }) {
-  const { state, playerTeam, dispatch } = useGame();
-  if (!state || !playerTeam) return null;
-  const team = state.teams.find((entry) => entry.teamId === playerTeam.id);
-  if (!team) return null;
+/* --------------------------- one part, one car ------------------------- */
+
+function PartBay({
+  category,
+  carIndex,
+  team,
+  wearFactor,
+}: {
+  category: PartCategory;
+  carIndex: number;
+  team: TeamSeasonState;
+  wearFactor: number;
+}) {
+  const { state, dispatch } = useGame();
+  if (!state) return null;
 
   const definition = PART_BY_ID.get(category)!;
   const Icon = GROUP_META[definition.group].icon;
 
   const drawing = partLevel(team, category);
-  const fitted = fittedPart(team, category);
+  const fitted = fittedPart(team, category, carIndex);
   const spares = sparePartsOf(team, category);
   const remaining = buildsRemaining(team, category, state.season);
   const cost = partBuildCost(team, category, state.season);
   const affordable = team.budget >= cost;
 
-  /* The part on the car is worth its spec faded by wear; the drawing is
-   * what a new one would be worth. The gap between them is the case for
-   * building, and it is the only number on this card that matters. */
   const onCar = fitted ? fitted.spec * partHealthFactor(fitted.healthPct) : drawing;
   const upside = drawing - onCar;
+  const left = fitted ? weekendsLeft(fitted, wearFactor) : 0;
 
   return (
-    <li className="rounded-lg border border-carbon-600/70 bg-carbon-900/40 p-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <Icon className="size-3.5 shrink-0" style={{ color: GROUP_META[definition.group].tone }} />
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-[12px] font-bold text-chrome-100">{definition.label}</p>
-          <p className="truncate text-[10px] text-chrome-500">
-            lasts {definition.lifeRounds} weekend{definition.lifeRounds === 1 ? '' : 's'} ·{' '}
-            {remaining}/{definition.buildAllowance} builds left this season
-          </p>
-        </div>
-        <span className="shrink-0 text-right">
-          <span
-            className="block font-mono text-[16px] font-bold"
-            style={{ color: levelTone(onCar) }}
-          >
-            {onCar.toFixed(1)}
-          </span>
-          <span className="block text-[8px] tracking-widest text-chrome-600 uppercase">
-            on the car
-          </span>
+    <li className="rounded-lg border border-carbon-600/70 bg-carbon-900/40 p-2.5">
+      <div className="flex items-center gap-2">
+        <Icon className="size-3 shrink-0" style={{ color: GROUP_META[definition.group].tone }} />
+        <span className="min-w-0 flex-1 truncate text-[11.5px] font-bold text-chrome-100">
+          {definition.label}
+        </span>
+        <span
+          className="shrink-0 font-mono text-[13px] font-bold"
+          style={{ color: levelTone(onCar) }}
+        >
+          {onCar.toFixed(1)}
         </span>
       </div>
 
       {fitted ? (
-        <div className="mt-2.5 rounded-md border border-carbon-600/70 bg-carbon-800/40 p-2">
-          <div className="mb-1.5 flex items-center justify-between gap-2">
-            <span className="font-mono text-[10px] text-chrome-400">
+        <div className="mt-1.5">
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <span className="font-mono text-[9.5px] text-chrome-500">
               spec {fitted.spec.toFixed(1)} · {Math.round(fitted.mileageLaps)} laps
             </span>
             <span
-              className="font-mono text-[10px] font-bold"
+              className="font-mono text-[9.5px] font-bold"
               style={{ color: healthTone(fitted.healthPct) }}
             >
-              {Math.round(fitted.healthPct)}% life
+              {fitted.healthPct <= 0
+                ? 'finished'
+                : `${left} weekend${left === 1 ? '' : 's'} left`}
             </span>
           </div>
-          <HealthBar healthPct={fitted.healthPct} />
-          {fitted.healthPct <= 0 && (
-            <p className="mt-1.5 flex items-center gap-1 text-[10px] font-bold text-neon-red">
-              <AlertTriangle className="size-3" />
-              Finished — it is costing you every lap it stays on.
-            </p>
-          )}
+          <HealthBar healthPct={fitted.healthPct} thin />
         </div>
       ) : (
-        <p className="mt-2.5 rounded-md border border-neon-amber/35 bg-neon-amber/[0.05] p-2 text-[10px] text-neon-amber">
-          Nothing built for this yet — the car is running the drawing.
+        <p className="mt-1.5 text-[9.5px] text-neon-amber">
+          Nothing fitted — running the drawing.
         </p>
       )}
 
-      <div className="mt-2.5 flex flex-wrap items-center gap-2">
-        <span className="flex-1 font-mono text-[10px] text-chrome-500">
-          new one: {drawing.toFixed(1)} spec · {formatCurrency(cost, true)}
-          {upside >= 0.5 && (
-            <span className="ml-1 text-neon-lime">+{upside.toFixed(1)}</span>
-          )}
+      <div className="mt-2 flex items-center gap-1.5">
+        <span className="min-w-0 flex-1 truncate font-mono text-[9.5px] text-chrome-500">
+          {formatCurrency(cost, true)} · {remaining}/{definition.buildAllowance} left
+          {upside >= 0.5 && <span className="ml-1 text-neon-lime">+{upside.toFixed(1)}</span>}
           {remaining === 0 && <span className="ml-1 text-neon-amber">rushed</span>}
         </span>
         <GameButton
@@ -199,12 +173,12 @@ function GarageBay({ category }: { category: PartCategory }) {
           disabled={!affordable}
           title={
             affordable
-              ? `Build a ${definition.label.toLowerCase()} at ${drawing.toFixed(1)} spec${
+              ? `Build a ${definition.label.toLowerCase()} for car ${carIndex + 1} at ${drawing.toFixed(1)} spec${
                   remaining === 0 ? ' — beyond the allowance, so it costs more' : ''
                 }`
               : `Costs ${formatCurrency(cost, true)}; you have ${formatCurrency(team.budget, true)}.`
           }
-          onClick={() => dispatch({ type: 'BUILD_PART', category })}
+          onClick={() => dispatch({ type: 'BUILD_PART', category, carIndex })}
           icon={<Hammer className="size-3" />}
         >
           Build
@@ -212,16 +186,139 @@ function GarageBay({ category }: { category: PartCategory }) {
       </div>
 
       {spares.length > 0 && (
-        <ul className="mt-2 grid gap-1.5">
-          <li className="text-[8.5px] tracking-widest text-chrome-600 uppercase">
-            On the shelf ({spares.length})
-          </li>
+        <ul className="mt-1.5 grid gap-1">
           {spares.map((spare) => (
-            <SpareRow key={spare.id} part={spare} />
+            <li
+              key={spare.id}
+              className="flex items-center gap-1.5 rounded border border-carbon-700 bg-carbon-950/40 px-1.5 py-1"
+            >
+              <span className="min-w-0 flex-1 truncate font-mono text-[9px] text-chrome-400">
+                shelf · {spare.spec.toFixed(1)} · {Math.round(spare.healthPct)}%
+              </span>
+              <button
+                type="button"
+                title={`Fit this to car ${carIndex + 1}`}
+                onClick={() => dispatch({ type: 'FIT_PART', partId: spare.id, carIndex })}
+                className="rounded border border-neon-cyan/40 bg-neon-cyan/10 px-1.5 py-0.5 font-mono text-[9px] font-bold text-neon-cyan transition-colors hover:bg-neon-cyan/20"
+              >
+                Fit
+              </button>
+              <button
+                type="button"
+                title="Scrap this spare"
+                onClick={() => dispatch({ type: 'SCRAP_PART', partId: spare.id })}
+                className="rounded border border-carbon-600 p-0.5 text-chrome-500 transition-colors hover:border-neon-red/50 hover:text-neon-red"
+              >
+                <Trash2 className="size-2.5" />
+              </button>
+            </li>
           ))}
         </ul>
       )}
     </li>
+  );
+}
+
+/* ------------------------------- one car ------------------------------- */
+
+function CarGarage({
+  carIndex,
+  team,
+  driver,
+  group,
+}: {
+  carIndex: number;
+  team: TeamSeasonState;
+  driver: Driver | undefined;
+  group: 'ALL' | keyof typeof GROUP_META;
+}) {
+  const { state, playerTeam } = useGame();
+  if (!state || !playerTeam) return null;
+
+  const wearFactor = driver ? driverWearFactor(state, driver.id) : 1;
+  const stats = carStatsOf(team, carIndex);
+  const rating = carRating(stats);
+
+  const bays = ASSEMBLY_PARTS.filter(
+    (category) => group === 'ALL' || PART_BY_ID.get(category)?.group === group,
+  );
+
+  const fitted = ASSEMBLY_PARTS.map((category) => fittedPart(team, category, carIndex)).filter(
+    (part): part is BuiltPart => Boolean(part),
+  );
+  const dueSoon = fitted.filter((part) => weekendsLeft(part, wearFactor) <= 1).length;
+  const behind = ASSEMBLY_PARTS.reduce((sum, category) => {
+    const part = fittedPart(team, category, carIndex);
+    if (!part) return sum;
+    return sum + Math.max(0, partLevel(team, category) - part.spec * partHealthFactor(part.healthPct));
+  }, 0);
+
+  return (
+    <Panel
+      title={`Car ${carIndex + 1}`}
+      icon={<Wrench className="size-3.5" />}
+      actions={
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge tone={dueSoon > 0 ? 'red' : 'neutral'} mono>
+            {dueSoon > 0 ? `${dueSoon} due` : 'all healthy'}
+          </Badge>
+          <Badge tone="cyan" mono>
+            {rating}
+          </Badge>
+        </div>
+      }
+    >
+      {/* Whose car this is, and what that costs the parts on it. */}
+      <div className="mb-3 flex items-center gap-2.5 rounded-lg border border-carbon-600/70 bg-carbon-900/50 p-2.5">
+        {driver ? (
+          <>
+            <DriverPortrait driver={driver} teamColor={playerTeam.color} size={38} />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[12px] font-bold text-chrome-100">
+                {driver.firstName} {driver.lastName}
+              </p>
+              <p className="truncate font-mono text-[9.5px] text-chrome-500">
+                #{driver.carNumber} · wears the car{' '}
+                <span
+                  style={{
+                    color:
+                      wearFactor > 1.08
+                        ? 'var(--color-neon-red)'
+                        : wearFactor < 0.94
+                          ? 'var(--color-neon-lime)'
+                          : 'var(--color-chrome-300)',
+                  }}
+                >
+                  {wearFactor > 1.08 ? 'hard' : wearFactor < 0.94 ? 'gently' : 'normally'} (
+                  {wearFactor.toFixed(2)}×)
+                </span>
+              </p>
+            </div>
+          </>
+        ) : (
+          <p className="text-[11px] text-neon-amber">No driver in this seat.</p>
+        )}
+      </div>
+
+      {behind >= 1 && (
+        <p className="mb-2.5 flex items-center gap-1.5 rounded-md border border-neon-amber/35 bg-neon-amber/[0.05] px-2 py-1.5 text-[10px] text-neon-amber">
+          <TrendingUp className="size-3 shrink-0" />
+          {behind.toFixed(1)} levels behind the drawings, across wear and parts never rebuilt.
+        </p>
+      )}
+
+      <ul className="grid gap-1.5">
+        {bays.map((category) => (
+          <PartBay
+            key={category}
+            category={category}
+            carIndex={carIndex}
+            team={team}
+            wearFactor={wearFactor}
+          />
+        ))}
+      </ul>
+    </Panel>
   );
 }
 
@@ -242,8 +339,6 @@ function PowerUnitPool() {
   const beyond = builtThisSeason >= ENGINE_ALLOCATION;
   const affordable = team.budget >= cost;
 
-  /* The unit is five parts at once, so its spec is the average of the
-   * five drawings — which is what a new one would be built to. */
   const drawing =
     POWER_UNIT_PARTS.reduce((sum, category) => sum + partLevel(team, category), 0) /
     POWER_UNIT_PARTS.length;
@@ -259,8 +354,9 @@ function PowerUnitPool() {
       }
     >
       <p className="mb-3 text-[11px] leading-relaxed text-chrome-500">
-        Five parts in one object, built to the drawings as they stand. Beyond{' '}
-        {ENGINE_ALLOCATION} in a season it is still legal — it just costs a Saturday.
+        Five parts in one object, and the one component both cars share — the allocation is the
+        team's. Beyond {ENGINE_ALLOCATION} in a season it is still legal, it just costs a
+        Saturday.
       </p>
 
       {penalty > 0 && (
@@ -351,7 +447,7 @@ function PowerUnitPool() {
 type GroupFilter = 'ALL' | keyof typeof GROUP_META;
 
 export function CarDevView() {
-  const { state, playerTeam } = useGame();
+  const { state, playerTeam, playerDrivers } = useGame();
   const [group, setGroup] = useState<GroupFilter>('ALL');
 
   const field = useMemo(() => {
@@ -365,36 +461,16 @@ export function CarDevView() {
   const team = state.teams.find((entry) => entry.teamId === playerTeam.id);
   if (!team) return null;
 
-  const bays = ASSEMBLY_PARTS.filter(
-    (category) => group === 'ALL' || PART_BY_ID.get(category)?.group === group,
-  );
-
-  const fittedParts = (team.builtParts ?? []).filter((part) => part.status === 'FITTED');
-  const worn = fittedParts.filter((part) => part.healthPct <= 25).length;
   const spares = (team.builtParts ?? []).filter((part) => part.status === 'POOL').length;
 
-  /* What the car is giving away to wear right now: the drawings it could
-   * be running against what is actually bolted to it. */
-  const behind = ASSEMBLY_PARTS.reduce((sum, category) => {
-    const fitted = fittedPart(team, category);
-    if (!fitted) return sum;
-    const gap = partLevel(team, category) - fitted.spec * partHealthFactor(fitted.healthPct);
-    return sum + Math.max(0, gap);
-  }, 0);
-
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
       <div className="grid gap-4">
         <Panel
-          title="The Garage — Steps 2 & 3: Build, Then Fit"
-          icon={<Wrench className="size-3.5" />}
+          title="The Garage — Two Cars, One Drawing Office"
+          icon={<Boxes className="size-3.5" />}
           actions={
             <div className="flex flex-wrap items-center gap-2">
-              {worn > 0 && (
-                <Badge tone="red" mono>
-                  {worn} nearly gone
-                </Badge>
-              )}
               {spares > 0 && (
                 <Badge tone="neutral" mono>
                   {spares} on the shelf
@@ -414,33 +490,33 @@ export function CarDevView() {
             </div>
           }
         >
-          <p className="mb-3 text-[11px] leading-relaxed text-chrome-500">
-            Every part is built to the drawing as it stands today, and its spec is frozen there —
-            developing the floor next month improves the next floor, not this one. Parts wear
-            out, so the car has to be rebuilt through the season, and each rebuild is a chance to
-            put whatever R&D has landed onto the car.
+          <p className="text-[11px] leading-relaxed text-chrome-500">
+            R&D raises a drawing for the whole team; everything after it belongs to one car. Each
+            car carries its own parts, worn at the rate its own driver sets — so the same wing
+            can be finished on one side of the garage and half-fresh on the other. The build
+            allowance is the team's, which is what makes{' '}
+            <span className="text-chrome-300">which car gets the next one</span> a decision.
+            Spares are shared: build one, fit it wherever it is needed most.
           </p>
-
-          {behind >= 1 && (
-            <p className="mb-3 flex items-center gap-1.5 rounded-md border border-neon-amber/35 bg-neon-amber/[0.05] px-2.5 py-2 text-[11px] text-neon-amber">
-              <TrendingUp className="size-3.5 shrink-0" />
-              The car is {behind.toFixed(1)} levels behind its own drawings, across wear and
-              parts never rebuilt. That is what a build programme buys back.
-            </p>
-          )}
-
-          <ul className="grid gap-2 sm:grid-cols-2">
-            {bays.map((category) => (
-              <GarageBay key={category} category={category} />
-            ))}
-          </ul>
         </Panel>
+
+        <div className="grid gap-4 2xl:grid-cols-2">
+          {Array.from({ length: CARS_PER_TEAM }, (_, carIndex) => (
+            <CarGarage
+              key={carIndex}
+              carIndex={carIndex}
+              team={team}
+              driver={playerDrivers[carIndex]}
+              group={group}
+            />
+          ))}
+        </div>
 
         {/* Field comparison, now with what every rival is working towards. */}
         <Panel title="Where the Car Sits" icon={<Gauge className="size-3.5" />}>
           <p className="mb-3 text-[11px] text-chrome-500">
-            Every constructor's package on the same scale, and the development direction each one
-            has committed to this season.
+            Every constructor's package on the same scale — the average of its two cars — and the
+            development direction each one has committed to this season.
           </p>
           <ul className="space-y-1">
             {field.map(({ team: entry, rating }, index) => {
@@ -489,8 +565,9 @@ export function CarDevView() {
 
         <Panel title="Build Allowances" icon={<Boxes className="size-3.5" />}>
           <p className="mb-3 text-[11px] leading-relaxed text-chrome-500">
-            What the regulations let you make this season. Going past an allowance is legal and
-            costs half as much again per part — but the budget is the real limit.
+            What the regulations let you make this season, counted across{' '}
+            <span className="text-chrome-300">both cars</span>. Going past an allowance is legal
+            and costs half as much again per part — the budget is the real limit.
           </p>
           <ul className="grid gap-1.5">
             {ASSEMBLY_PARTS.map((category) => {
@@ -531,17 +608,17 @@ export function CarDevView() {
               {
                 n: 1,
                 title: 'Upgrade in R&D',
-                body: 'Commission a programme on a part. Weeks later the drawing for it moves up. The car does not change.',
+                body: 'Commission a programme on a part. Weeks later the drawing moves up — for the team, so both cars can be built to it.',
               },
               {
                 n: 2,
-                title: 'Build here',
-                body: 'The factory makes one part to that drawing. Its spec is frozen at the moment it is built.',
+                title: 'Build for a car',
+                body: 'The factory makes one part to that drawing, for the car you chose. Its spec is frozen at that moment.',
               },
               {
                 n: 3,
                 title: 'Fit it',
-                body: 'Bolt it on. Whatever comes off goes back on the shelf, and the car statistics move.',
+                body: 'Bolt it on. What comes off goes on the shelf and can be fitted to either car later.',
               },
             ].map((step) => (
               <li key={step.n} className="flex gap-2.5">
@@ -549,9 +626,7 @@ export function CarDevView() {
                   {step.n}
                 </span>
                 <span className="min-w-0">
-                  <span className="block text-[11px] font-bold text-chrome-100">
-                    {step.title}
-                  </span>
+                  <span className="block text-[11px] font-bold text-chrome-100">{step.title}</span>
                   <span className="block text-[10.5px] leading-relaxed text-chrome-500">
                     {step.body}
                   </span>
@@ -562,38 +637,53 @@ export function CarDevView() {
         </Panel>
 
         <Panel title="Car Statistics" icon={<Wind className="size-3.5" />}>
+          <div className="mb-2 grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
+            <span className="text-[9px] tracking-widest text-chrome-600 uppercase">Stat</span>
+            {Array.from({ length: CARS_PER_TEAM }, (_, index) => (
+              <span
+                key={index}
+                className="w-9 text-right text-[9px] tracking-widest text-chrome-600 uppercase"
+              >
+                Car {index + 1}
+              </span>
+            ))}
+          </div>
           <ul className="grid gap-1.5">
             {(
               [
-                ['Pace', team.car.pace],
-                ['Aerodynamics', team.car.aero],
-                ['Power unit', team.car.powerUnit],
-                ['Energy systems', team.car.electrical],
-                ['Reliability', team.car.reliability],
-                ['Brakes', team.car.brakes],
-                ['Suspension', team.car.suspension],
-                ['Cooling', team.car.cooling],
+                ['Pace', 'pace'],
+                ['Aerodynamics', 'aero'],
+                ['Power unit', 'powerUnit'],
+                ['Energy systems', 'electrical'],
+                ['Reliability', 'reliability'],
+                ['Brakes', 'brakes'],
+                ['Suspension', 'suspension'],
+                ['Cooling', 'cooling'],
               ] as const
-            ).map(([label, value]) => (
-              <li key={label} className="flex items-center gap-2">
-                <span className="min-w-0 flex-1 truncate text-[10.5px] text-chrome-300">
-                  {label}
-                </span>
-                <span className="h-1.5 w-20 shrink-0 overflow-hidden rounded-full bg-carbon-700">
-                  <span
-                    className="block h-full rounded-full"
-                    style={{ width: `${value}%`, background: levelTone(value) }}
-                  />
-                </span>
-                <span className="w-7 shrink-0 text-right font-mono text-[10px] font-bold text-chrome-100">
-                  {Math.round(value)}
-                </span>
+            ).map(([label, key]) => (
+              <li
+                key={label}
+                className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2"
+              >
+                <span className="min-w-0 truncate text-[10.5px] text-chrome-300">{label}</span>
+                {Array.from({ length: CARS_PER_TEAM }, (_, carIndex) => {
+                  const value = carStatsOf(team, carIndex)[key];
+                  return (
+                    <span
+                      key={carIndex}
+                      className="w-9 text-right font-mono text-[10.5px] font-bold"
+                      style={{ color: levelTone(value) }}
+                    >
+                      {Math.round(value)}
+                    </span>
+                  );
+                })}
               </li>
             ))}
           </ul>
           <p className="mt-3 text-[10.5px] leading-relaxed text-chrome-500">
-            Derived entirely from what is bolted to the car — never edited directly. A worn part
-            shows up here before it shows up on a Sunday.
+            Two columns because they are two cars. Each is derived entirely from what is bolted
+            to it — a worn part shows up here before it shows up on a Sunday.
           </p>
         </Panel>
       </div>

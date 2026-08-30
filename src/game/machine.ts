@@ -9,6 +9,7 @@ import {
   buildFullSet,
   buildPart,
   buildPowerUnit,
+  CARS_PER_TEAM,
   buildsRemaining,
   enginePenaltyPlaces,
   fittedPart,
@@ -34,6 +35,7 @@ import {
   GRID_SEATS_PER_TEAM,
   MAX_SQUAD_SIZE,
   demoteToReserve,
+  driverWearFactor,
   joinSquad,
   leaveSquad,
   openSeatsAt,
@@ -123,6 +125,7 @@ import {
   updateManagerScore,
 } from './jobMarket';
 import { SAVE_VERSION } from './types';
+import type { CarStats } from '@/data/grid2026';
 import type { ComponentVariant } from '@/types/career';
 import type {
   BuiltPart,
@@ -335,6 +338,8 @@ export function createNewGame(managerName = 'New Manager'): GameState {
       teamId: team.id,
       budget: team.budget,
       car: { ...team.car },
+      // Filled in by `refreshCar` below, once the parts exist.
+      cars: [] as CarStats[],
       parts,
       powerUnits: [first],
       fittedPowerUnitId: first.id,
@@ -589,6 +594,7 @@ function clone(state: GameState): GameState {
     teams: state.teams.map((team) => ({
       ...team,
       car: { ...team.car },
+      cars: (team.cars ?? []).map((car) => ({ ...car })),
       parts: team.parts.map((part) => ({ ...part })),
       powerUnits: team.powerUnits.map((unit) => ({ ...unit, spec: { ...unit.spec } })),
       builtParts: (team.builtParts ?? []).map((part) => ({ ...part })),
@@ -893,10 +899,12 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         );
       }
 
-      const serial = (team.builtParts ?? []).filter(
-        (part) => part.category === event.category,
-      ).length;
-      const made = buildPart(team, event.category, next.season, serial);
+      if (event.carIndex < 0 || event.carIndex >= CARS_PER_TEAM) {
+        return refuse('There is no such car.');
+      }
+
+      const serial = (team.builtParts ?? []).length;
+      const made = buildPart(team, event.category, next.season, serial, event.carIndex);
       team.builtParts = [...(team.builtParts ?? []), made];
 
       post(
@@ -920,11 +928,17 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
       if (part.status === 'FITTED') return refuse('That part is already on the car.');
       if (part.status === 'RETIRED') return refuse('That part is finished — build a new one.');
 
-      /* Whatever was on the car comes off and goes back on the shelf,
-       * unless it is worn out, in which case it is scrap. */
-      const current = fittedPart(team, part.category);
+      /* A spare belongs to the garage rather than to one car, so fitting
+       * it says which car it is going on. Whatever it replaces comes off
+       * and goes back on the shelf — unless it is finished, in which case
+       * it is scrap. */
+      const target = event.carIndex ?? part.carIndex;
+      if (target < 0 || target >= CARS_PER_TEAM) return refuse('There is no such car.');
+
+      const current = fittedPart(team, part.category, target);
       if (current) current.status = current.healthPct <= 0 ? 'RETIRED' : 'POOL';
 
+      part.carIndex = target;
       part.status = 'FITTED';
       refreshCar(team);
       break;
@@ -1994,10 +2008,17 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         unit.healthPct = Math.max(0, Math.round((unit.healthPct - wear) * 10) / 10);
         if (unit.healthPct <= 0) unit.status = 'RETIRED';
 
-        /* And the rest of the car with it. Only the player keeps an
-         * inventory, so this is a no-op for the AI, which is abstracted
-         * above the level parts live at. */
-        const worn = wearFittedParts(team, event.result.totalLaps, next.settings.raceLengthPct);
+        /* And the rest of the car with it — at a rate its own driver
+         * sets, so the two cars in a garage never need rebuilding on the
+         * same weekend. */
+        const worn = wearFittedParts(
+          team,
+          event.result.totalLaps,
+          next.settings.raceLengthPct,
+          raceDriversOf(next, team.teamId).map((driverId) =>
+            driverWearFactor(next, driverId),
+          ),
+        );
 
         /* A part that has reached the end is still on the car — a team
          * does not race without a floor — but it is giving back the

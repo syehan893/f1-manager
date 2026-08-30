@@ -1,4 +1,7 @@
-import type { GameState } from './types';
+import { effectiveDriver } from './driverDevelopment';
+import { carStatsOf } from './carModel';
+import type { CarStats } from '@/data/grid2026';
+import type { GameState, TeamSeasonState } from './types';
 
 /* =====================================================================
  * Who is on the books, and who is in the car.
@@ -95,6 +98,87 @@ export function gridDriverIds(state: GameState): string[] {
 
 export function isOnGrid(state: GameState, driverId: string): boolean {
   return isRaceDriver(state, driverId);
+}
+
+/* ------------------------------ which car ------------------------------ */
+
+/**
+ * Which of the team's two cars a driver is in, or -1 if they are not
+ * racing. One driver, one car: the first name in the line-up drives car
+ * 1, the second drives car 2.
+ */
+export function carIndexOf(state: GameState, driverId: string): number {
+  const teamId = state.driverTeams[driverId];
+  if (!teamId) return -1;
+  return raceDriversOf(state, teamId).indexOf(driverId);
+}
+
+/**
+ * The statistics of the car this driver is actually in.
+ *
+ * Two cars in the same garage are two different machines once a season
+ * has worn them unevenly, so anything that decides lap time has to ask
+ * about the car rather than about the constructor.
+ */
+export function statsForDriver(
+  state: GameState,
+  driverId: string,
+  team?: TeamSeasonState,
+): CarStats {
+  const resolved =
+    team ?? state.teams.find((entry) => entry.teamId === state.driverTeams[driverId]);
+  if (!resolved) return { ...FALLBACK_CAR };
+
+  const index = carIndexOf(state, driverId);
+  return carStatsOf(resolved, index < 0 ? 0 : index);
+}
+
+/** Used only when a driver has no team at all — a free agent on a screen. */
+const FALLBACK_CAR: CarStats = {
+  pace: 70, aero: 70, powerUnit: 70, electrical: 70, reliability: 70,
+  pitCrew: 70, brakes: 70, suspension: 70, cooling: 70,
+};
+
+/* ---------------------------- how they drive --------------------------- */
+
+/**
+ * How hard one driver is on the car, as a multiplier on part wear.
+ *
+ * This is what makes two cars in the same garage need rebuilding on
+ * different weekends. Three things feed it, and they are the three
+ * things a driver is actually judged on by the mechanics:
+ *
+ *   smoothness   tyre management and consistency, which is the same
+ *                mechanical sympathy that saves a set of brakes
+ *   aggression   attack, which is worth lap time and costs the car
+ *   the orders   the push level the pit wall gave them, because being
+ *                told to race flat out is not free
+ *
+ * Roughly 0.75 for a smooth driver on a conservative plan to 1.35 for an
+ * aggressive one being told to push — so a front wing that lasts three
+ * weekends on one side of the garage lasts barely two on the other.
+ */
+export function driverWearFactor(state: GameState, driverId: string): number {
+  const driver = effectiveDriver(state, driverId);
+  if (!driver) return 1;
+
+  const { tyreManagement, consistency, attack } = driver.attributes;
+
+  /* Centred on 70, which is an average driver and therefore exactly 1.
+   * Above it they save the car, below it they use it up. */
+  const smoothness = ((tyreManagement + consistency) / 2 - 70) / 100;
+  const aggression = (attack - 70) / 100;
+
+  /* Push is the pit wall's own contribution, and the only part of this
+   * the player can change without changing driver. 3 is neutral. */
+  const push = (state.strategies[driverId]?.pushLevel ?? 3) - 3;
+
+  /* A driver who is wound up is heavier on the car than the same driver
+   * settled — the stress number finally doing something mechanical. */
+  const stress = ((state.driverConditions[driverId]?.stress ?? 30) - 30) / 100;
+
+  const factor = 1 - smoothness * 0.55 + aggression * 0.35 + push * 0.06 + stress * 0.25;
+  return Math.max(0.7, Math.min(1.4, Math.round(factor * 100) / 100));
 }
 
 /* ------------------------------ mutation ------------------------------ */

@@ -233,6 +233,15 @@ export interface PartState {
 export interface BuiltPart {
   id: string;
   category: PartCategory;
+  /**
+   * Which of the team's two cars this part belongs to, 0 or 1.
+   *
+   * A part belongs to a car, not to a driver: swapping who sits in the
+   * seat does not move the floor across the garage. What the driver does
+   * change is how fast it wears — the same wing lasts noticeably longer
+   * on the smoother of two team-mates.
+   */
+  carIndex: number;
   builtInSeason: number;
   /** The drawing level it was made to. Never changes after the build. */
   spec: number;
@@ -240,6 +249,14 @@ export interface BuiltPart {
   /** 100 fresh, 0 finished. */
   healthPct: number;
   status: 'FITTED' | 'POOL' | 'RETIRED';
+  /**
+   * Part of the car as homologated at the start of the season, rather
+   * than something built during it. These do not count against the
+   * build allowance: the allowance governs what a team makes in-season,
+   * and charging it for the car it turned up with would leave a
+   * two-chassis allowance spent before the first race.
+   */
+  homologated?: boolean;
 }
 
 /** A physical power unit: a spec, and mileage on it. */
@@ -287,11 +304,19 @@ export interface TeamSeasonState {
   powerUnits: PowerUnitState[];
   fittedPowerUnitId: string | null;
   /**
-   * Physical parts this team has made, fitted and spare. Empty for the
-   * AI, which is abstracted above this: a team with no inventory reads
-   * its drawings directly, exactly as every team used to.
+   * Physical parts this team has made, across both cars: fitted, spare
+   * and scrapped. One drawing office, two garages — the design is shared
+   * and what is bolted to each car is not.
    */
   builtParts: BuiltPart[];
+  /**
+   * Per-car statistics, index 0 and 1. Derived from each car's own
+   * fitted parts, so two cars on the same drawings can be genuinely
+   * different machines by mid-season. `car` above stays the team's
+   * headline figure — the average of these — for the tables and the
+   * comparisons that talk about a constructor rather than a car.
+   */
+  cars: CarStats[];
   development: DevelopmentProject[];
   philosophy: DevelopmentPhilosophy;
 }
@@ -599,7 +624,7 @@ export interface RoundRecord {
   pointsScored: number;
 }
 
-export const SAVE_VERSION = 14;
+export const SAVE_VERSION = 15;
 
 export interface GameState {
   /** Bumped when the shape changes; older saves are discarded on load. */
@@ -710,8 +735,9 @@ export type GameEvent =
   | { type: 'BUILD_POWER_UNIT' }
   | { type: 'FIT_POWER_UNIT'; unitId: string }
   /* ---- the garage: build a part, then bolt it on ---- */
-  | { type: 'BUILD_PART'; category: PartCategory }
-  | { type: 'FIT_PART'; partId: string }
+  | { type: 'BUILD_PART'; category: PartCategory; carIndex: number }
+  /** `carIndex` omitted keeps the part on the car it was built for. */
+  | { type: 'FIT_PART'; partId: string; carIndex?: number }
   | { type: 'SCRAP_PART'; partId: string }
   | { type: 'SET_PHILOSOPHY'; philosophy: DevelopmentPhilosophy }
   | { type: 'START_UPGRADE'; variantId: string }
