@@ -29,6 +29,7 @@ import { scaledLaps } from '@/game/trackAdapter';
 import { cx, flagEmoji, formatClock } from '@/lib/format';
 import { useGame } from '@/state/gameContext';
 import { useRace } from '@/state/raceContext';
+import { useRaceSound } from '@/state/useRaceSound';
 import type { GamePhase } from '@/game/types';
 import type { ViewId } from '@/types';
 
@@ -236,10 +237,21 @@ function PitwallRace({ onNavigate }: { onNavigate: (view: ViewId) => void }) {
     send({ type: 'SET_SPEED', multiplier: nextPaused ? 0 : speed * TIME_COMPRESSION });
   }, [paused, speed, send]);
 
+  /* The race, out loud. Every one of these is a count the snapshot
+   * already carries, so watching it go up is both simpler and more
+   * reliable than trying to intercept the event on its way past — and it
+   * cannot double-fire on a re-render.
+   *
+   * Above the early return, because it is a hook and the screen has a
+   * no-track case: a hook that only runs sometimes runs in a different
+   * order next render. */
+  useRaceSound(snapshot);
+
   if (!state || !currentTrack) return null;
 
   const totalLaps = scaledLaps(currentTrack, state.settings.raceLengthPct);
   const progressPct = Math.min(100, (snapshot.lap / totalLaps) * 100);
+
   const ourCars = snapshot.cars.filter(
     (car) => state.driverTeams[car.driverId] === playerTeam?.id,
   );

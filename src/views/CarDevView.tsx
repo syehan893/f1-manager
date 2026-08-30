@@ -41,6 +41,7 @@ import { PHILOSOPHY_BLURB, PHILOSOPHY_LABEL, philosophyFor } from '@/game/aiDeve
 import { GROUP_META, levelTone } from '@/lib/partStyle';
 import { cx, formatCurrency } from '@/lib/format';
 import { useGame } from '@/state/gameContext';
+import { useSound } from '@/state/useSound';
 import type { BuiltPart, PartCategory, TeamSeasonState } from '@/game/types';
 import type { Driver } from '@/types';
 
@@ -107,6 +108,7 @@ function PartBay({
   wearFactor: number;
 }) {
   const { state, dispatch } = useGame();
+  const play = useSound();
   if (!state) return null;
 
   const definition = PART_BY_ID.get(category)!;
@@ -178,7 +180,10 @@ function PartBay({
                 }`
               : `Costs ${formatCurrency(cost, true)}; you have ${formatCurrency(team.budget, true)}.`
           }
-          onClick={() => dispatch({ type: 'BUILD_PART', category, carIndex })}
+          onClick={() => {
+            play('build');
+            dispatch({ type: 'BUILD_PART', category, carIndex });
+          }}
           icon={<Hammer className="size-3" />}
         >
           Build
@@ -198,7 +203,10 @@ function PartBay({
               <button
                 type="button"
                 title={`Fit this to car ${carIndex + 1}`}
-                onClick={() => dispatch({ type: 'FIT_PART', partId: spare.id, carIndex })}
+                onClick={() => {
+                  play('fit');
+                  dispatch({ type: 'FIT_PART', partId: spare.id, carIndex });
+                }}
                 className="rounded border border-neon-cyan/40 bg-neon-cyan/10 px-1.5 py-0.5 font-mono text-[9px] font-bold text-neon-cyan transition-colors hover:bg-neon-cyan/20"
               >
                 Fit
@@ -326,6 +334,7 @@ function CarGarage({
 
 function PowerUnitPool() {
   const { state, playerTeam, dispatch } = useGame();
+  const play = useSound();
   if (!state || !playerTeam) return null;
   const team = state.teams.find((entry) => entry.teamId === playerTeam.id);
   if (!team) return null;
@@ -399,7 +408,10 @@ function PowerUnitPool() {
                   <GameButton
                     size="sm"
                     variant="secondary"
-                    onClick={() => dispatch({ type: 'FIT_POWER_UNIT', unitId: unit.id })}
+                    onClick={() => {
+                      play('fit');
+                      dispatch({ type: 'FIT_POWER_UNIT', unitId: unit.id });
+                    }}
                   >
                     Fit
                   </GameButton>
@@ -425,7 +437,10 @@ function PowerUnitPool() {
                 : 'Build a fresh power unit to the current drawings.'
               : `Costs ${formatCurrency(cost, true)}; you have ${formatCurrency(team.budget, true)}.`
           }
-          onClick={() => dispatch({ type: 'BUILD_POWER_UNIT' })}
+          onClick={() => {
+            play('build');
+            dispatch({ type: 'BUILD_POWER_UNIT' });
+          }}
           icon={<Hammer className="size-3" />}
         >
           Build unit
