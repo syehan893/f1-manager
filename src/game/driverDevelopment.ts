@@ -1,8 +1,8 @@
 import { DRIVER_BY_ID } from '@/data/drivers';
 import { driverRating } from '@/data/grid2026';
-import { seedAttributes } from '@/data/attributeSeed';
+import { buildIntake } from './youthTalent';
 import type { Driver, DriverAttributes } from '@/types';
-import type { DriverRecord, GameState, ProspectDriver } from './types';
+import type { DriverRecord, GameState, ProspectDriver, SeasonTally } from './types';
 
 /* =====================================================================
  * Driver development.
@@ -85,7 +85,44 @@ export const ATTRIBUTE_KEYS = Object.keys(CURVES) as Array<keyof DriverAttribute
 /** Hard ceiling on how far any one attribute can drift from where it began. */
 const MAX_DELTA = 18;
 
+/* ---------------------------------------------------------------------
+ * Age, and the two ends of a career.
+ *
+ * The per-attribute curves above already peak at different ages, which
+ * is what makes a veteran a different driver rather than a worse one.
+ * But they peak as late as thirty-five, and the form and experience
+ * terms are added on top of the decline — so a thirty-nine-year-old
+ * having a good season could still finish it *rated higher* than he
+ * started it, indefinitely. A career with no downhill in it is not a
+ * career.
+ *
+ * VETERAN_AGE is the line. Past it nothing adds: no form, no experience,
+ * no upside from the noise. Every attribute moves by its own decline and
+ * only its own decline, so the overall rating falls every year, gently
+ * at first and faster as the years pile up.
+ * ------------------------------------------------------------------- */
+
+/** Age past which a driver can no longer gain rating on any channel. */
+export const VETERAN_AGE = 38;
+/** Age from which retirement becomes a real possibility. */
+export const RETIREMENT_WATCH_AGE = 34;
+/** Nobody races past this. */
+export const HARD_RETIREMENT_AGE = 44;
+
 /* ------------------------------ the record ----------------------------- */
+
+export function blankSeasonTally(): SeasonTally {
+  return {
+    races: 0,
+    points: 0,
+    wins: 0,
+    podiums: 0,
+    poles: 0,
+    dnfs: 0,
+    qualifyingWins: 0,
+    qualifyingDuels: 0,
+  };
+}
 
 export function blankRecord(driverId: string, age: number): DriverRecord {
   return {
@@ -96,7 +133,24 @@ export function blankRecord(driverId: string, age: number): DriverRecord {
     careerPoints: 0,
     careerWins: 0,
     careerPodiums: 0,
+    careerRaces: 0,
+    careerPoles: 0,
+    careerDnfs: 0,
+    careerBestFinish: null,
+    season: blankSeasonTally(),
+    ratingHistory: [],
   };
+}
+
+/**
+ * A record that is safe to read, whatever wrote it.
+ *
+ * Records are created in several places and one of them is a save file
+ * written by an older build. Rather than scatter `?? 0` across every
+ * caller, anything that reads the statistics goes through here.
+ */
+export function tallyOf(record: DriverRecord | undefined): SeasonTally {
+  return record?.season ?? blankSeasonTally();
 }
 
 /** Records for the whole grid at the start of a career. */
@@ -280,15 +334,84 @@ function seeded(season: number, driverId: string): number {
   return ((hash ^ (hash >>> 13)) >>> 0) / 4294967296;
 }
 
+/* --------------------------- how a season read -------------------------- */
+
+/**
+ * How well a driver actually did, −1 to +1.
+ *
+ * The old measure was share of the team's points and nothing else, which
+ * has two holes big enough to drive a career through. A driver in a car
+ * that scored nothing had a season worth zero evidence — 0/0 read as
+ * "level with the team-mate" whether they had dragged it into Q3 every
+ * week or spun it into a wall. And absolute achievement counted for
+ * nothing: winning the championship and beating a team-mate 60-40 in a
+ * backmarker came out the same.
+ *
+ * So it is built from four things a scout would actually name, weighted
+ * by how much each one controls for the car:
+ *
+ *   the team-mate       same machinery, so the fairest read there is
+ *   qualifying          one lap, no strategy, no luck — the purest one
+ *   what they won       wins and podiums are worth something on their own
+ *   getting it home     a driver who does not finish develops nothing
+ */
+export function performanceIndex(state: GameState, driverId: string): number {
+  const record = state.driverRecords[driverId];
+  const tally = tallyOf(record);
+  if (tally.races === 0) return 0;
+
+  const teamId = state.driverTeams[driverId];
+  const mateId = Object.entries(state.driverTeams).find(
+    ([id, team]) => team === teamId && id !== driverId,
+  )?.[0];
+
+  const points = tally.points;
+  const matePoints = mateId ? tallyOf(state.driverRecords[mateId]).points : 0;
+  const total = points + matePoints;
+
+  /* Share of the team's points, −1 to +1. When neither car scored this
+   * says nothing at all rather than saying "level": the qualifying and
+   * finishing terms below are what carry a driver in a bad car. */
+  const share = total > 0 ? (points / total - 0.5) * 2 : 0;
+  const shareWeight = total > 0 ? 1 : 0;
+
+  /* Qualifying head to head. The same machinery on the same lap, which
+   * is why it is worth as much as the points despite scoring nothing. */
+  const duels = tally.qualifyingDuels;
+  const quali = duels > 0 ? (tally.qualifyingWins / duels - 0.5) * 2 : 0;
+  const qualiWeight = duels > 0 ? 1 : 0;
+
+  /* What they actually won. A win is worth a great deal more to a young
+   * driver's development than a run of sevenths, and this is the term
+   * that says so. Saturates: a champion is not four times a race winner. */
+  const silverware = Math.min(1, (tally.wins * 0.34 + tally.podiums * 0.14 + tally.poles * 0.1));
+
+  /* Bringing it home. Retirements that are the driver's own doing are
+   * the clearest negative evidence there is. */
+  const finishRate = 1 - tally.dnfs / tally.races;
+  const reliability = (finishRate - 0.86) * 2.2;
+
+  const weighted =
+    share * 1.15 * shareWeight +
+    quali * 0.95 * qualiWeight +
+    silverware * 0.9 +
+    reliability * 0.5;
+  const divisor = 1.15 * shareWeight + 0.95 * qualiWeight + 0.9 + 0.5;
+
+  return Math.max(-1, Math.min(1, weighted / divisor));
+}
+
 export interface DevelopmentNote {
   driverId: string;
   /** Signed change to the overall rating this off-season. */
   change: number;
   ageAfter: number;
-  reason: 'GROWTH' | 'PEAK' | 'DECLINE';
+  reason: 'GROWTH' | 'PEAK' | 'DECLINE' | 'VETERAN';
   /** The two attributes that moved most, for the season review. */
   biggestGain: { key: keyof DriverAttributes; change: number } | null;
   biggestLoss: { key: keyof DriverAttributes; change: number } | null;
+  /** How the season itself read, −1 to +1. What drove the change. */
+  form: number;
 }
 
 /**
@@ -298,29 +421,28 @@ export interface DevelopmentNote {
  */
 export function advanceDriverSeason(state: GameState): DevelopmentNote[] {
   const notes: DevelopmentNote[] = [];
+  const retired = new Set(state.retiredDriverIds ?? []);
 
   for (const record of Object.values(state.driverRecords)) {
+    // A career that has ended does not keep moving.
+    if (retired.has(record.driverId)) continue;
+
     const ratingBefore = currentRating(state, record.driverId);
+    const tally = tallyOf(record);
+
+    /* How the season actually went, across everything it produced —
+     * measured before the record is rolled forward. */
+    const form = performanceIndex(state, record.driverId);
+
     record.age += 1;
-    record.seasonsRun += 1;
+    if (tally.races > 0) record.seasonsRun += 1;
 
-    /* How the season actually went, measured against the driver's own
-     * team-mate — the only comparison that controls for the car. */
-    const row = state.standings.drivers.find((entry) => entry.driverId === record.driverId);
-    const teamId = state.driverTeams[record.driverId];
-    const mateId = Object.entries(state.driverTeams).find(
-      ([id, team]) => team === teamId && id !== record.driverId,
-    )?.[0];
-    const matePoints = mateId
-      ? (state.standings.drivers.find((entry) => entry.driverId === mateId)?.points ?? 0)
-      : 0;
-    const points = row?.points ?? 0;
-    const total = points + matePoints;
-    // −1 (beaten badly) .. +1 (beat the team-mate comfortably).
-    const form = total > 0 ? (points / total - 0.5) * 2 : 0;
-
-    record.careerPoints += points;
-    record.careerWins += row?.wins ?? 0;
+    record.careerPoints += tally.points;
+    record.careerWins += tally.wins;
+    record.careerPodiums += tally.podiums;
+    record.careerPoles += tally.poles;
+    record.careerRaces += tally.races;
+    record.careerDnfs += tally.dnfs;
 
     /* Racing seasons are what actually teach the learned attributes, so a
      * driver who has run ten years keeps gaining on them long after their
@@ -334,6 +456,11 @@ export function advanceDriverSeason(state: GameState): DevelopmentNote[] {
     const ceiling = potentialOf(state, record.driverId);
     const headroom = clampUnit((ceiling - currentRating(state, record.driverId)) / 6);
 
+    /* Past the veteran line nothing adds. Not form, not experience, not
+     * the upside of the noise — this is the switch that guarantees a
+     * career has a downhill in it. */
+    const veteran = record.age >= VETERAN_AGE;
+
     let biggestGain: DevelopmentNote['biggestGain'] = null;
     let biggestLoss: DevelopmentNote['biggestLoss'] = null;
 
@@ -342,9 +469,32 @@ export function advanceDriverSeason(state: GameState): DevelopmentNote[] {
       const noise = (seeded(state.season, record.driverId + key) - 0.5) * 1.2;
 
       let change: number;
-      if (record.age <= curve.peakAge) {
-        // Still climbing, and climbing faster when the results back it up.
-        change = (curve.growth + form * curve.formWeight) * headroom + noise;
+      if (veteran) {
+        /* Only the decline, and it steepens every year past the line.
+         * The noise can make one year harsher than another but never
+         * turns the sign: a veteran's rating falls, full stop. */
+        const years = record.age - VETERAN_AGE;
+        const fade = Math.max(curve.decline, 0.22) * (1 + years * 0.3);
+        change = -fade * (1 + Math.abs(noise) * 0.2);
+      } else if (record.age <= curve.peakAge) {
+        /* Still climbing, and how fast is mostly about the season they
+         * just had. The two terms are deliberately asymmetric:
+         *
+         * The upside is gated by headroom, because no amount of winning
+         * takes a driver past their own ceiling. The downside is not —
+         * a season of being beaten and putting it in the wall costs a
+         * young driver even when they have a career of room left, which
+         * is the whole reason a bad seat is bad for a prospect.
+         *
+         * Calibrated so a title year is worth about four points of
+         * rating to a young driver with room to grow, and a season of
+         * being beaten and retiring from half of it is worth nothing at
+         * all — they age a year and stand still. */
+        const formEffect =
+          form >= 0
+            ? form * curve.formWeight * 2.2 * headroom
+            : form * curve.formWeight * 3.4;
+        change = curve.growth * headroom + formEffect + noise;
       } else {
         /* Past the peak the loss accelerates, but experience keeps paying
          * into the learned attributes for years afterwards — which is why
@@ -364,109 +514,137 @@ export function advanceDriverSeason(state: GameState): DevelopmentNote[] {
       if (!biggestLoss || moved < biggestLoss.change) biggestLoss = { key, change: moved };
     }
 
-    const ratingAfter = currentRating(state, record.driverId);
+    let ratingAfter = currentRating(state, record.driverId);
+
+    /* The clamp that makes the rule true rather than merely likely.
+     *
+     * Every attribute moved down, but the overall rating is a rounded
+     * weighted average of thirteen clamped integers — so a driver
+     * already pinned at the −18 delta floor on the attributes that
+     * carry weight can come out level, and "cannot gain past 38" would
+     * be a claim the code does not actually keep. If the rating has not
+     * fallen, take it down by hand. */
+    if (veteran && ratingAfter >= ratingBefore) {
+      for (const key of ATTRIBUTE_KEYS) {
+        const before = record.deltas[key] ?? 0;
+        record.deltas[key] = Math.max(-MAX_DELTA, Math.round((before - 0.6) * 10) / 10);
+      }
+      ratingAfter = Math.min(currentRating(state, record.driverId), ratingBefore - 1);
+    }
+
+    record.ratingHistory = [...(record.ratingHistory ?? []), ratingAfter].slice(-25);
+    // The season's page is turned; next year starts from nothing.
+    record.season = blankSeasonTally();
+
     const peakish = CURVES.pace.peakAge;
 
     notes.push({
       driverId: record.driverId,
       change: ratingAfter - ratingBefore,
       ageAfter: record.age,
-      reason:
-        record.age <= peakish ? 'GROWTH' : record.age <= CURVES.racecraft.peakAge ? 'PEAK' : 'DECLINE',
+      reason: veteran
+        ? 'VETERAN'
+        : record.age <= peakish
+          ? 'GROWTH'
+          : record.age <= CURVES.racecraft.peakAge
+            ? 'PEAK'
+            : 'DECLINE',
       biggestGain: biggestGain && biggestGain.change > 0.15 ? biggestGain : null,
       biggestLoss: biggestLoss && biggestLoss.change < -0.15 ? biggestLoss : null,
+      form,
     });
   }
 
   return notes;
 }
 
-/* ------------------------------ prospects ------------------------------ */
+/* ----------------------------- retirement ------------------------------- */
 
-const PROSPECT_FIRST = [
-  'Théo', 'Nico', 'Emil', 'Rafa', 'Kenji', 'Milan', 'Aaron', 'Luca',
-  'Sander', 'Diogo', 'Tomas', 'Ravi', 'Felix', 'Mateo', 'Jonas', 'Ari',
-];
-
-const PROSPECT_LAST = [
-  'Verhoeven', 'Brandão', 'Kaufmann', 'Lindholm', 'Serrano', 'Baptiste',
-  'Yamada', 'Novotny', 'Aaltonen', 'Mercier', 'Grimaldi', 'Ostrowski',
-  'Van Dijk', 'Barros', 'Nyström', 'Ferrand',
-];
-
-const PROSPECT_COUNTRIES = ['NL', 'BR', 'DE', 'FI', 'ES', 'FR', 'JP', 'CZ', 'IT', 'PL', 'PT', 'SE'];
-
-function prospectHash(seed: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return (h >>> 0) / 4294967296;
+export interface RetirementNote {
+  driverId: string;
+  age: number;
+  reason: 'AGE' | 'NO_SEAT' | 'DECLINE';
+  /** How the paddock reported it. */
+  note: string;
 }
 
 /**
- * The junior intake for one season. Regenerated every year, so a class
- * the player passes on is genuinely gone, and deterministic on the
- * season so reloading cannot fish for a better one.
+ * Whether this driver hangs up their helmet this winter.
+ *
+ * Ageing without retirement is the same bug as a contract that never
+ * expires: the grid could only ever get older, a forty-five-year-old
+ * kept a seat by inertia, and no seat ever opened up because somebody
+ * had simply had enough. Three things decide it, and they compound:
+ *
+ *   how old they are      certain by the hard limit, unlikely before 34
+ *   whether they have a drive   nobody sits out two winters at 36
+ *   how far they have fallen    a driver off their own peak knows it
+ *
+ * Deterministic on (season, driverId) so a reload cannot save a career.
  */
-export function buildProspects(season: number, count = 6): ProspectDriver[] {
-  const used = new Set<string>();
-  const prospects: ProspectDriver[] = [];
+export function retirementCheck(state: GameState, driverId: string): RetirementNote | null {
+  const record = state.driverRecords[driverId];
+  const driver = effectiveDriver(state, driverId);
+  if (!record || !driver) return null;
 
-  for (let index = 0; index < count; index++) {
-    const key = `${season}:prospect:${index}`;
-    const r1 = prospectHash(key + 'a');
-    const r2 = prospectHash(key + 'b');
-    const r3 = prospectHash(key + 'c');
-    const r4 = prospectHash(key + 'd');
+  const age = record.age;
+  if (age < RETIREMENT_WATCH_AGE) return null;
 
-    const first = PROSPECT_FIRST[Math.floor(r1 * PROSPECT_FIRST.length)]!;
-    let lastIndex = Math.floor(r2 * PROSPECT_LAST.length);
-    let last = PROSPECT_LAST[lastIndex]!;
-    for (let attempt = 0; used.has(`${first} ${last}`) && attempt < PROSPECT_LAST.length; attempt++) {
-      lastIndex = (lastIndex + 1) % PROSPECT_LAST.length;
-      last = PROSPECT_LAST[lastIndex]!;
-    }
-    used.add(`${first} ${last}`);
-
-    /* A junior is signed on what they might become, not what they are.
-     * The gap between the two is the whole gamble. */
-    const potential = Math.round(74 + r3 * 24);
-    const raw = Math.round(potential - 10 - r4 * 12);
-
-    /* A junior is quick and fearless and short on the things only laps
-     * teach. The seeding helper handles the rest: at seventeen it hands
-     * them almost no defending, racecraft or tyre management, which is
-     * exactly the gap they spend their first seasons closing. */
-    const age = 17 + Math.floor(r4 * 4);
-    const attrs = seedAttributes(`prospect-${season}-${index}`, age, {
-      pace: raw,
-      cornering: raw - 1 + Math.round(r1 * 3),
-      braking: raw - 2 + Math.round(r2 * 4),
-      attack: raw + Math.round(r4 * 4),
-      consistency: raw - 8 + Math.round(r3 * 4),
-      reaction: raw + 2 + Math.round(r1 * 3),
-      stamina: raw - 4 + Math.round(r2 * 5),
-      wetWeather: raw - 7 + Math.round(r3 * 6),
-    });
-
-    prospects.push({
-      id: `prospect-${season}-${index}`,
-      code: (first.slice(0, 1) + last.slice(0, 2)).toUpperCase(),
-      firstName: first,
-      lastName: last,
-      countryCode: PROSPECT_COUNTRIES[Math.floor(r3 * PROSPECT_COUNTRIES.length)]!,
+  const hasSeat = Boolean(state.driverTeams[driverId]);
+  if (age >= HARD_RETIREMENT_AGE) {
+    return {
+      driverId,
       age,
-      potential,
-      attributes: attrs,
-      // Juniors are cheap, which is most of the appeal.
-      salary: Math.round((900_000 + potential * 22_000) / 100_000) * 100_000,
-      scoutedInSeason: season,
-    });
+      reason: 'AGE',
+      note: `${driver.lastName} retires from the sport at ${age} after ${record.seasonsRun} seasons.`,
+    };
   }
 
-  return prospects;
+  /* Rising from nothing at the watch age to near-certain by the hard
+   * limit. Squared so the middle years stay a real question rather than
+   * a slow, predictable slide. */
+  const span = HARD_RETIREMENT_AGE - RETIREMENT_WATCH_AGE;
+  let chance = Math.pow((age - RETIREMENT_WATCH_AGE) / span, 2) * 0.9;
+
+  // A driver without a drive is deciding whether to wait another year.
+  if (!hasSeat) chance += age >= 36 ? 0.55 : 0.25;
+
+  /* How far they are off their own best. A driver who is still at their
+   * peak keeps going; one who has lost five points of rating from it has
+   * had the conversation with themselves already. */
+  const history = record.ratingHistory ?? [];
+  const peak = history.length > 0 ? Math.max(...history) : currentRating(state, driverId);
+  const fallen = peak - currentRating(state, driverId);
+  if (fallen > 3) chance += Math.min(0.3, (fallen - 3) * 0.06);
+
+  // A champion holds on longer than a driver with nothing to defend.
+  if (record.careerWins >= 10) chance -= 0.12;
+
+  if (seeded(state.season, driverId + ':retire') > Math.min(0.97, chance)) return null;
+
+  const reason: RetirementNote['reason'] = !hasSeat ? 'NO_SEAT' : fallen > 3 ? 'DECLINE' : 'AGE';
+  return {
+    driverId,
+    age,
+    reason,
+    note:
+      reason === 'NO_SEAT'
+        ? `${driver.lastName} calls time at ${age} rather than wait for a seat that is not coming.`
+        : reason === 'DECLINE'
+          ? `${driver.lastName} steps away at ${age}, some way off the driver he was.`
+          : `${driver.lastName} retires at ${age} after ${record.seasonsRun} seasons.`,
+  };
+}
+
+/* ------------------------------ prospects ------------------------------ */
+
+/**
+ * The junior intake, now the feeder-series field. Kept here as the name
+ * the rest of the game already calls; the generation itself lives in
+ * `youthTalent.ts` and the championship in `feederSeries.ts`.
+ */
+export function buildProspects(season: number, count = 6): ProspectDriver[] {
+  return buildIntake(season, count);
 }
 
 /**

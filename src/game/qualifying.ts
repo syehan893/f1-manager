@@ -1,4 +1,4 @@
-import { carRating, driverRating } from '@/data/grid2026';
+import { carRatingAt, driverRating } from '@/data/grid2026';
 import type { CarStats } from '@/data/grid2026';
 import { profileFor } from './difficulty';
 import type { Driver } from '@/types';
@@ -74,7 +74,12 @@ function baseLapTimeMs(
   const reference = track.lapRecordMs * 1.015;
   const profile = profileFor(difficulty);
 
-  const carScore = carStats ? carRating(carStats) : 70;
+  /* Rated for this circuit rather than in the abstract: qualifying is
+   * where a car's character shows most, because there is no strategy and
+   * no traffic to hide behind. A car built for downforce is on pole at a
+   * downforce track and eighth on a power circuit, which is what makes
+   * Saturday worth watching across a season. */
+  const carScore = carStats ? carRatingAt(carStats, track.characteristics) : 70;
   const driverScore = driverRating(driver);
 
   // A 100-rated package sits on the reference; everything else is slower.

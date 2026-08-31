@@ -29,6 +29,9 @@ const SeasonConfigView = lazy(() =>
 const DriverMarketView = lazy(() =>
   import('@/views/career/DriverMarketView').then((m) => ({ default: m.DriverMarketView })),
 );
+const YouthAcademyView = lazy(() =>
+  import('@/views/career/YouthAcademyView').then((m) => ({ default: m.YouthAcademyView })),
+);
 const RndCenterView = lazy(() =>
   import('@/views/career/RndCenterView').then((m) => ({ default: m.RndCenterView })),
 );
@@ -91,6 +94,12 @@ function ViewRouter({
       return (
         <Managed>
           <DriverMarketView />
+        </Managed>
+      );
+    case 'career-youth':
+      return (
+        <Managed>
+          <YouthAcademyView />
         </Managed>
       );
     case 'career-rnd':

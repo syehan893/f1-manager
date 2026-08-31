@@ -1,4 +1,4 @@
-import { TYRE_MODEL } from './raceEngine';
+import { TYRE_MODEL, WEAR_KNEE, tyreWearPenalty } from './raceEngine';
 import type { StintPlan, TyreCompound } from '@/types';
 
 /* =====================================================================
@@ -12,7 +12,12 @@ import type { StintPlan, TyreCompound } from '@/types';
 const FUEL_BURN_PER_LAP = 1.92;
 const PIT_LOSS_S = 21.5;
 /** Wear beyond this point costs disproportionate lap time. */
-export const CLIFF_PCT = 80;
+/* The cliff, as a percentage, taken from the engine's own knee so the
+ * two cannot drift apart again. */
+export const CLIFF_PCT = Math.round(WEAR_KNEE * 100);
+
+/** A representative lap, for projections made without a circuit. */
+const NOMINAL_LAP_MS = 92_000;
 
 export interface StintPoint {
   lap: number;
@@ -32,8 +37,11 @@ export function pushFactors(pushLevel: number) {
 
 /**
  * Project wear and lap-time loss across a stint.
- * The loss curve is linear until the cliff, then quadratic beyond it —
- * the same shape the race engine applies per tick.
+ *
+ * The curve comes from the engine rather than being restated here. It
+ * used to be restated, with a different linear term, a different knee
+ * and a different cliff — so the planner was projecting a race nobody
+ * was going to run, which is the one thing a planner must never do.
  */
 export function projectStint(
   compound: TyreCompound,
@@ -41,6 +49,7 @@ export function projectStint(
   pushLevel: number,
   startLap = 1,
   startWearPct = 0,
+  baseLapMs = NOMINAL_LAP_MS,
 ): StintPoint[] {
   const model = TYRE_MODEL[compound];
   const { wearMultiplier } = pushFactors(pushLevel);
@@ -48,10 +57,11 @@ export function projectStint(
 
   for (let i = 0; i <= laps; i++) {
     const wearPct = Math.min(100, startWearPct + i * model.wearPerLap * wearMultiplier);
-    const wear = wearPct / 100;
-    const lapTimeLossS =
-      wear * 3.9 + Math.pow(Math.max(0, wear - CLIFF_PCT / 100), 2) * 50;
-    points.push({ lap: startLap + i, wearPct, lapTimeLossS });
+    points.push({
+      lap: startLap + i,
+      wearPct,
+      lapTimeLossS: (tyreWearPenalty(wearPct) * baseLapMs) / 1000,
+    });
   }
 
   return points;

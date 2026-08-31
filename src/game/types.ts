@@ -401,9 +401,73 @@ export interface DriverRecord {
   careerPoints: number;
   careerWins: number;
   careerPodiums: number;
+  /** Races started. Experience is counted in races, not seasons. */
+  careerRaces: number;
+  careerPoles: number;
+  /** Races that ended early. Reliability of the driver, not the car. */
+  careerDnfs: number;
+  /** Best finishing position of the whole career, 1 for a win. */
+  careerBestFinish: number | null;
+  /** What this season has produced so far. Cleared at the rollover. */
+  season: SeasonTally;
+  /**
+   * Overall rating at the end of each season, oldest first. The career
+   * arc as a line rather than a single number — which is the only way a
+   * player can see a driver improving before the results say so.
+   */
+  ratingHistory: number[];
+  /**
+   * Winters spent without a drive.
+   *
+   * A driver who loses their seat does not wait forever for another
+   * one: they take a drive in another category and are gone. Without
+   * this the free-agent list only ever grows — a decade into a career
+   * there were seventy-six drivers nominally available and no seats for
+   * any of them, which is not a market, it is a queue.
+   */
+  seasonsWithoutSeat?: number;
+  /** Set the winter a driver hangs up their helmet. */
+  retiredInSeason?: number;
 }
 
-/** A junior generated for one season's intake. */
+/**
+ * One season's output for one driver.
+ *
+ * Development used to read a single number — share of the team's points
+ * — which meant a driver in a car that scored nothing developed on no
+ * evidence at all, and a driver who took four poles and retired from
+ * four races looked identical to one who finished eighth every time.
+ */
+export interface SeasonTally {
+  races: number;
+  points: number;
+  wins: number;
+  podiums: number;
+  poles: number;
+  dnfs: number;
+  /** Qualifying head-to-head against the team-mate: wins, then races. */
+  qualifyingWins: number;
+  qualifyingDuels: number;
+}
+
+/**
+ * How rare this driver is. One standout arrives every year, one generational
+ * talent every five, one prodigy every ten — see `youthTalent.ts`.
+ */
+export type TalentTier = 'STANDARD' | 'STANDOUT' | 'GENERATIONAL' | 'PRODIGY';
+
+/** What kind of driver this is, before anybody knows how good they are. */
+export type DriverArchetype =
+  | 'RAW_SPEED'
+  | 'QUALIFIER'
+  | 'RACER'
+  | 'TYRE_WHISPERER'
+  | 'RAIN_MASTER'
+  | 'IRON_NERVE'
+  | 'ENGINEER'
+  | 'STREET_FIGHTER';
+
+/** A junior in the feeder series, and on the market. */
 export interface ProspectDriver {
   id: string;
   code: string;
@@ -416,6 +480,44 @@ export interface ProspectDriver {
   attributes: DriverAttributes;
   salary: number;
   scoutedInSeason: number;
+  tier: TalentTier;
+  archetype: DriverArchetype;
+  /** One line from the scouting report, in a scout's words. */
+  note: string;
+  /** Seasons already spent in the feeder series. */
+  seasonsInF2: number;
+}
+
+/* ---------------------------- feeder series ---------------------------- */
+
+/** One driver's F2 season. */
+export interface F2Standing {
+  position: number;
+  driverId: string;
+  /**
+   * The driver's name, written into the row rather than looked up.
+   *
+   * The table outlives the field it was drawn from: the bottom five are
+   * released the same winter the results are published, and a champion
+   * is usually signed within days. A row that can only name its driver
+   * by searching the current field goes blank for exactly the drivers
+   * the player most wants to read about.
+   */
+  name: string;
+  tier: TalentTier;
+  points: number;
+  wins: number;
+  podiums: number;
+  poles: number;
+  bestFinish: number;
+}
+
+/** A completed F2 championship. Results only — no laps are simulated. */
+export interface F2Season {
+  season: number;
+  rounds: number;
+  standings: F2Standing[];
+  championDriverId: string | null;
 }
 
 /* --------------------------- season archive ---------------------------- */
@@ -645,7 +747,7 @@ export interface RoundRecord {
   pointsScored: number;
 }
 
-export const SAVE_VERSION = 15;
+export const SAVE_VERSION = 16;
 
 export interface GameState {
   /** Bumped when the shape changes; older saves are discarded on load. */
@@ -718,8 +820,20 @@ export interface GameState {
   driverRecords: Record<string, DriverRecord>;
   /** Mood, stress, morale and fitness for every driver on the grid. */
   driverConditions: Record<string, DriverCondition>;
-  /** This season's junior intake. Regenerated every year. */
+  /**
+   * The feeder-series field: every junior the player can sign.
+   *
+   * This used to be six cards regenerated from nothing every winter, so
+   * a class the player passed on was gone and no junior ever had a
+   * history. It is now the F2 grid — the same drivers season to season,
+   * ageing and developing, with the bottom five replaced each winter.
+   * A prospect is somebody the player has *watched*.
+   */
   prospects: ProspectDriver[];
+  /** Last completed F2 championship, or null before one has been run. */
+  f2: F2Season | null;
+  /** Every completed F2 season, newest last. */
+  f2Archive: F2Season[];
   /* Juniors who have taken a seat. The intake above is rebuilt from
    * scratch every season, so a graduate has to be copied somewhere
    * durable at the moment they are signed — otherwise they hold a seat
@@ -732,6 +846,12 @@ export interface GameState {
   social: SocialPost[];
   /** Completed championships, newest last. */
   seasonArchive: SeasonRecord[];
+  /**
+   * Drivers who have left the sport for good, newest last. They keep
+   * their record — a career has to be readable after it ends — but they
+   * hold no seat, appear on no market and never race again.
+   */
+  retiredDriverIds: string[];
   /**
    * Grid places the player will drop at the next race for exceeding the
    * power-unit allocation. Applied when the grid forms, then cleared.
@@ -799,6 +919,8 @@ export type GameEvent =
   /* `outgoingDriverId` is optional now: a junior joins the squad, and
    * only displaces somebody when the caller explicitly says to. */
   | { type: 'SIGN_PROSPECT'; prospectId: string; outgoingDriverId?: string }
+  /** Take a free agent — somebody out of contract — onto the books. */
+  | { type: 'SIGN_FREE_AGENT'; driverId: string }
   | { type: 'CONFIRM_SPONSORS' }
   | { type: 'COUNTDOWN_COMPLETE' }
   | { type: 'RACE_COMPLETE'; result: RaceResult }

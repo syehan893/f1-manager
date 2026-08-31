@@ -5,7 +5,8 @@ import { raceDriversOf, squadOf } from './roster';
 import { postMail } from './mail';
 import { PUNDITS, FAN_ACCOUNTS, handleFor, postSocial, teamHandle, voiceFor } from './social';
 import type { SocialAuthorKind } from './social';
-import type { GameState, QualifyingResult, RaceResult, TransferMove } from './types';
+import type { F2Season, GameState, QualifyingResult, RaceResult, TransferMove } from './types';
+import type { RetirementNote } from './driverDevelopment';
 
 /* =====================================================================
  * Turning a season into things people say about it.
@@ -431,6 +432,97 @@ export function announceSillySeason(state: GameState, moves: TransferMove[]): vo
     `${state.season}:silly:${moves.length}`,
     'TRANSFER',
     `${moves.length} moves in this window. The grid that lines up next year is not the one that finished this one.`,
+  );
+}
+
+/* ------------------------------ retirement ----------------------------- */
+
+/**
+ * A career ending.
+ *
+ * Nobody used to leave the sport, so this is a kind of news the paddock
+ * has never had to report before. It is worth doing properly: a driver
+ * who has been on the grid for fifteen seasons of a career is somebody
+ * the player has actually raced against, and their last day should not
+ * be a silent deletion from the seat map.
+ */
+export function announceRetirement(state: GameState, note: RetirementNote): void {
+  const record = state.driverRecords[note.driverId];
+  const name = nameOf(state, note.driverId);
+  const wins = record?.careerWins ?? 0;
+  const races = record?.careerRaces ?? 0;
+
+  const record_line =
+    races > 0
+      ? `${races} start${races === 1 ? '' : 's'}, ${wins} win${wins === 1 ? '' : 's'}, ${record?.careerPodiums ?? 0} podium${(record?.careerPodiums ?? 0) === 1 ? '' : 's'}.`
+      : 'A career that never quite got the seat it needed.';
+
+  postMail(state, {
+    category: 'TRANSFER',
+    from: 'Paddock Wire',
+    subject: `${name} retires`,
+    importance: wins >= 5 ? 'HIGH' : 'NORMAL',
+    driverId: note.driverId,
+    body: `${note.note}\n\n${record_line}`,
+  });
+
+  asVoice(
+    state,
+    PUNDITS,
+    `${state.season}:retire:${note.driverId}`,
+    'TRANSFER',
+    wins >= 5
+      ? `That is it for ${name}. ${record_line} They do not make many of those.`
+      : `${note.note} ${record_line}`,
+    wins >= 5 ? 'HIGH' : 'NORMAL',
+  );
+}
+
+/** A single line from the winter market, said out loud. */
+export function announceTransferNote(state: GameState, note: string): void {
+  asVoice(state, PUNDITS, `${state.season}:market:${note.slice(0, 24)}`, 'TRANSFER', note, 'LOW');
+}
+
+/* ---------------------------- feeder series ---------------------------- */
+
+/**
+ * The F2 season, reported the way the player will actually use it: a
+ * champion, a top three, and a note about who is worth signing. This is
+ * the evidence behind every potential on the youth screen, so it is
+ * written as evidence rather than as flavour.
+ */
+export function announceF2Season(state: GameState, season: F2Season): void {
+  const top = season.standings.slice(0, 3);
+  if (top.length === 0) return;
+
+  const champion = top[0]!.name;
+
+  postMail(state, {
+    category: 'STAFF',
+    from: 'Head of Scouting',
+    subject: `F2 ${season.season}: ${champion} takes the title`,
+    importance: 'NORMAL',
+    body:
+      `The feeder series is done for the year.\n\n` +
+      top
+        .map(
+          (row) =>
+            `${row.position}. ${row.name} — ${row.points} pts, ` +
+            `${row.wins} win${row.wins === 1 ? '' : 's'}, ${row.poles} pole${row.poles === 1 ? '' : 's'}`,
+        )
+        .join('\n') +
+      `\n\nThe full table is on the Youth Academy screen. Anybody on it can be signed, ` +
+      `and the ones at the top will not be there long.`,
+  });
+
+  asVoice(
+    state,
+    PUNDITS,
+    `${season.season}:f2:champion`,
+    'YOUTH',
+    `${champion} wins F2 with ${top[0]!.wins} win${top[0]!.wins === 1 ? '' : 's'}. ` +
+      `Every team principal in the paddock has that name written down.`,
+    'HIGH',
   );
 }
 

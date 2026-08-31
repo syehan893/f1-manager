@@ -5,9 +5,9 @@ import {
   ArrowUpFromLine,
   Handshake,
   Search,
-  Sparkles,
   Tag,
   UserMinus,
+  UserPlus,
   Users,
   UsersRound,
 } from 'lucide-react';
@@ -19,7 +19,8 @@ import { DriverPortrait } from '@/components/ui/DriverPortrait';
 import { GameButton } from '@/components/game/GameButton';
 import { driverRating, gridTeamOf } from '@/data/grid2026';
 import { cx, flagEmoji, formatCurrency } from '@/lib/format';
-import { prospectToDriver, scoutedRange } from '@/game/driverDevelopment';
+import { effectiveDriver } from '@/game/driverDevelopment';
+import { emptyPlayerSeats, freeAgents } from '@/game/offSeason';
 import {
   MAX_CONTRACT_SEASONS,
   askingTerms,
@@ -551,86 +552,99 @@ function BidsPanel() {
 }
 
 /* ---------------------------------------------------------------------
- * The junior intake.
+ * Free agents.
  *
- * A new class every season, and the one you pass on is gone — an AI team
- * will take them instead. A prospect is signed on their ceiling rather
- * than on what the timing screen says today, which is the whole gamble:
- * cheap, fast, and short on everything that only laps teach.
+ * Contracts now genuinely run out, which means there is now genuinely
+ * such a thing as a driver without a team: somebody whose deal expired
+ * and who nobody re-signed, including drivers the player let go by not
+ * paying attention in the winter.
+ *
+ * They cost no transfer fee — that is the whole appeal — and they can be
+ * signed on the spot rather than negotiated for. The catch is that they
+ * are usually available for a reason, and the good ones do not last: a
+ * rival will take them the moment a seat opens.
  * ------------------------------------------------------------------- */
 
-function YoungTalent() {
+function FreeAgents() {
   const { state, dispatch } = useGame();
   if (!state) return null;
 
-  const unsigned = state.prospects.filter((prospect) => !state.driverTeams[prospect.id]);
+  const available = freeAgents(state);
   const room = state.playerTeamId ? squadHasRoom(state, state.playerTeamId) : false;
+  const short = emptyPlayerSeats(state);
 
   return (
     <Panel
-      title={`Junior Intake — Class of ${state.season}`}
-      icon={<Sparkles className="size-3.5" />}
+      title="Free Agents"
+      icon={<UserPlus className="size-3.5" />}
       actions={
-        <Badge tone={unsigned.length > 0 ? 'cyan' : 'neutral'} mono>
-          {unsigned.length} available
-        </Badge>
+        <div className="flex flex-wrap items-center gap-2">
+          {short > 0 && (
+            <Badge tone="red">
+              {short === 1 ? 'One seat empty' : `${short} seats empty`}
+            </Badge>
+          )}
+          <Badge tone={available.length > 0 ? 'lime' : 'neutral'} mono>
+            {available.length} out of contract
+          </Badge>
+        </div>
       }
     >
       <p className="mb-3 text-[11px] leading-relaxed text-chrome-500">
-        A fresh class every season, and it does not carry over — anyone still unsigned at the
-        flag can be promoted by a rival instead. You are buying the ceiling, not the current
-        rating. Signing one adds him to the squad: he takes a race seat if you have one free,
-        and goes on the bench if you do not. Nobody is released to make room.
+        Drivers whose contracts ran out and who nobody has re-signed. No transfer fee and no
+        negotiation — they want a drive. They will not be here long: rival teams fill their own
+        empty seats from this list every winter.
       </p>
 
-      {unsigned.length === 0 ? (
+      {available.length === 0 ? (
         <p className="py-6 text-center text-[11px] text-chrome-500">
-          This year's class has all found seats.
+          Nobody is out of contract. Every seat on the grid is spoken for.
         </p>
       ) : (
         <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
-          {unsigned.map((prospect) => {
-            const driver = prospectToDriver(prospect);
-            const now = driverRating(driver);
-            /* A ceiling nobody can measure is the whole gamble. Scouts
-             * give a range, not a number, and it only narrows once the
-             * driver has actually run seasons. */
-            const scouted = scoutedRange(state, prospect.id);
+          {available.map((driverId) => {
+            const driver = effectiveDriver(state, driverId);
+            if (!driver) return null;
+            const rating = driverRating(driver);
+            const record = state.driverRecords[driverId];
+            /* What the reducer will actually charge, so the card is not
+             * quoting a different number to the transaction. */
+            const salary =
+              Math.round((1_200_000 + Math.pow(Math.max(0, rating - 55), 2.1) * 5_400) / 100_000) *
+              100_000;
+            const waiting = record?.seasonsWithoutSeat ?? 0;
 
             return (
               <div
-                key={prospect.id}
+                key={driverId}
                 className="flex flex-col rounded-lg border border-carbon-600 bg-carbon-900/50 p-3"
               >
                 <div className="flex items-start gap-2">
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-[13px] font-bold text-chrome-100">
-                      {flagEmoji(prospect.countryCode)} {prospect.firstName} {prospect.lastName}
+                      {flagEmoji(driver.countryCode)} {driver.firstName} {driver.lastName}
                     </p>
                     <p className="truncate text-[10px] text-chrome-500">
-                      Age {prospect.age} · {formatCurrency(prospect.salary, true)}/yr
+                      Age {driver.age} · {record?.careerRaces ?? 0} starts ·{' '}
+                      {record?.careerWins ?? 0} wins
                     </p>
                   </div>
+                  <Badge tone={rating >= 84 ? 'lime' : rating >= 76 ? 'cyan' : 'neutral'} mono>
+                    {rating}
+                  </Badge>
                 </div>
 
-                {/* Now against ceiling: the gap is the reason to sign them. */}
-                <div className="mt-2 grid grid-cols-2 gap-1.5">
-                  <div className="rounded-md border border-carbon-700 bg-carbon-950/50 px-2 py-1.5">
-                    <p className="text-[8px] tracking-widest text-chrome-600 uppercase">Today</p>
-                    <p className="font-mono text-[13px] font-bold text-chrome-300">{now}</p>
-                  </div>
-                  <div className="rounded-md border border-neon-cyan/25 bg-neon-cyan/[0.06] px-2 py-1.5">
-                    <p className="text-[8px] tracking-widest text-chrome-600 uppercase">
-                      Scouted ceiling
-                    </p>
-                    <p className="font-mono text-[13px] font-bold text-neon-cyan">
-                      {scouted.low}–{scouted.high}
-                      <span className="ml-1 text-[9px] font-normal opacity-70">
-                        ({scouted.high - scouted.low > 8 ? 'raw read' : 'confident'})
-                      </span>
-                    </p>
-                  </div>
-                </div>
+                {waiting > 0 && (
+                  <p className="mt-2 text-[10px] text-amber-300/80">
+                    {waiting === 1
+                      ? 'A season without a drive.'
+                      : `${waiting} seasons without a drive — running out of time.`}
+                  </p>
+                )}
+
+                <p className="mt-2 text-[10px] text-chrome-500">
+                  Asking {formatCurrency(salary, true)}/yr on a two-year deal.
+                </p>
 
                 <GameButton
                   size="sm"
@@ -638,13 +652,11 @@ function YoungTalent() {
                   disabled={!room}
                   title={
                     room
-                      ? `Sign ${prospect.lastName} into the squad`
+                      ? `Sign ${driver.lastName} on a free transfer`
                       : `Your squad is full at ${MAX_SQUAD_SIZE}. Release or sell somebody first.`
                   }
-                  onClick={() =>
-                    dispatch({ type: 'SIGN_PROSPECT', prospectId: prospect.id })
-                  }
-                  icon={<Sparkles className="size-3" />}
+                  onClick={() => dispatch({ type: 'SIGN_FREE_AGENT', driverId })}
+                  icon={<UserPlus className="size-3" />}
                 >
                   Sign
                 </GameButton>
@@ -721,7 +733,7 @@ export function DriverMarketView() {
 
       <BidsPanel />
       <NegotiationPanel />
-      <YoungTalent />
+      <FreeAgents />
 
       {/* The rest of the grid */}
       <Panel

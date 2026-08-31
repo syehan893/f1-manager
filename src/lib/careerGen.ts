@@ -134,22 +134,127 @@ interface TrackSeed {
   countryCode: string;
   profile: TrackProfile;
   isBaseTrack?: boolean;
+  /**
+   * Authored dimensions and character.
+   *
+   * The original twelve venues were generated from their profile alone:
+   * four archetypes with a little jitter, which meant every power circuit
+   * was the same power circuit and a calendar was four races repeated
+   * three times. Now the engine actually reads these — a car is rated for
+   * the circuit it is at, tyres wear at the circuit's rate, and how hard
+   * it is to pass is the circuit's business — so a venue with no opinion
+   * of its own is a wasted round.
+   *
+   * Each new circuit is drawn on the pattern of a real one without being
+   * it: the shape of the lap, the mix of corners, what it asks of a car
+   * and what it costs to follow another one round it.
+   */
+  lengthKm?: number;
+  corners?: number;
+  drsZones?: number;
+  characteristics?: TrackCharacteristics;
+  /** Roughly how quick a lap is here, in seconds, for the record time. */
+  lapSeconds?: number;
 }
 
-/** One circuit carried over from the base game, plus eleven new venues. */
+/** Shorthand for authoring: downforce, power, tyre stress, braking, overtaking. */
+const ch = (
+  downforce: number,
+  power: number,
+  tyreStress: number,
+  braking: number,
+  overtaking: number,
+): TrackCharacteristics => ({ downforce, power, tyreStress, braking, overtaking });
+
+/**
+ * The calendar.
+ *
+ * Twenty-four venues, each drawn on the pattern of a real kind of Grand
+ * Prix circuit rather than on one of four templates. The five numbers
+ * after each name are what the car and the tyres actually meet:
+ * downforce, power, tyre stress, braking and overtaking.
+ *
+ * They are authored rather than generated because they are now the thing
+ * that makes one round different from another. A season where every
+ * circuit asks the same question of a car is a season with one race in
+ * it, repeated.
+ */
 const TRACK_SEEDS: TrackSeed[] = [
+  /* --- the circuit shipped with the base game ----------------------- */
   { id: 'suzuka', name: 'Suzuka International', city: 'Suzuka', country: 'Japan', countryCode: 'JP', profile: 'BALANCED', isBaseTrack: true },
-  { id: 'valcanto', name: 'Autodromo di Valcanto', city: 'Valcanto', country: 'Italy', countryCode: 'IT', profile: 'POWER' },
-  { id: 'kallang', name: 'Kallang Bay Street Circuit', city: 'Singapore', country: 'Singapore', countryCode: 'SG', profile: 'STREET' },
-  { id: 'meridian', name: 'Cape Meridian Raceway', city: 'Cape Town', country: 'South Africa', countryCode: 'ZA', profile: 'BALANCED' },
-  { id: 'nordhavn', name: 'Nordhavn Ring', city: 'Aalborg', country: 'Denmark', countryCode: 'DK', profile: 'HIGH_DOWNFORCE' },
-  { id: 'sierraalta', name: 'Sierra Alta International', city: 'Toluca', country: 'Mexico', countryCode: 'MX', profile: 'POWER' },
-  { id: 'rannoch', name: 'Loch Rannoch Circuit', city: 'Perthshire', country: 'United Kingdom', countryCode: 'GB', profile: 'HIGH_DOWNFORCE' },
-  { id: 'bahiadorada', name: 'Bahia Dorada Street Circuit', city: 'Valparaiso', country: 'Chile', countryCode: 'CL', profile: 'STREET' },
-  { id: 'gulfpearl', name: 'Gulf Pearl Circuit', city: 'Lusail', country: 'Qatar', countryCode: 'QA', profile: 'POWER' },
-  { id: 'silverpine', name: 'Silverpine Park', city: 'Mont-Tremblant', country: 'Canada', countryCode: 'CA', profile: 'BALANCED' },
-  { id: 'kaimai', name: 'Mount Kaimai Raceway', city: 'Tauranga', country: 'New Zealand', countryCode: 'NZ', profile: 'HIGH_DOWNFORCE' },
-  { id: 'anatolia', name: 'Anatolia Coastal Circuit', city: 'Antalya', country: 'Turkiye', countryCode: 'TR', profile: 'BALANCED' },
+
+  /* --- temples of top speed ----------------------------------------- *
+   * Long straights, almost no downforce, and a lap decided by the power
+   * unit. Tyres have an easy afternoon; following is easy and passing
+   * easier still. */
+  { id: 'valcanto', name: 'Autodromo di Valcanto', city: 'Valcanto', country: 'Italy', countryCode: 'IT',
+    profile: 'POWER', lengthKm: 5.793, corners: 11, drsZones: 2, lapSeconds: 82, characteristics: ch(24, 96, 44, 58, 88) },
+  { id: 'gulfpearl', name: 'Gulf Pearl Circuit', city: 'Lusail', country: 'Qatar', countryCode: 'QA',
+    profile: 'POWER', lengthKm: 5.419, corners: 16, drsZones: 2, lapSeconds: 84, characteristics: ch(46, 78, 88, 52, 61) },
+  { id: 'sierraalta', name: 'Sierra Alta International', city: 'Toluca', country: 'Mexico', countryCode: 'MX',
+    profile: 'POWER', lengthKm: 4.304, corners: 17, drsZones: 3, lapSeconds: 78, characteristics: ch(72, 91, 47, 63, 74) },
+  { id: 'lakeshore', name: 'Lakeshore Speedway Circuit', city: 'Duluth', country: 'United States', countryCode: 'US',
+    profile: 'POWER', lengthKm: 6.201, corners: 10, drsZones: 2, lapSeconds: 88, characteristics: ch(21, 94, 39, 49, 84) },
+
+  /* --- fast and flowing --------------------------------------------- *
+   * Long-radius corners taken nearly flat: a car needs downforce *and*
+   * power, and the loads destroy a set of tyres. */
+  { id: 'ardennes', name: 'Circuit des Hautes Ardennes', city: 'Stavelot', country: 'Belgium', countryCode: 'BE',
+    profile: 'BALANCED', lengthKm: 7.004, corners: 19, drsZones: 2, lapSeconds: 106, characteristics: ch(63, 82, 79, 55, 79) },
+  { id: 'thornbury', name: 'Thornbury Aerodrome Circuit', city: 'Northamptonshire', country: 'United Kingdom', countryCode: 'GB',
+    profile: 'HIGH_DOWNFORCE', lengthKm: 5.891, corners: 18, drsZones: 2, lapSeconds: 87, characteristics: ch(84, 61, 93, 47, 66) },
+  { id: 'meridian', name: 'Cape Meridian Raceway', city: 'Cape Town', country: 'South Africa', countryCode: 'ZA',
+    profile: 'BALANCED', lengthKm: 4.653, corners: 16, drsZones: 2, lapSeconds: 79, characteristics: ch(66, 64, 74, 58, 63) },
+  { id: 'silverpine', name: 'Silverpine Park', city: 'Mont-Tremblant', country: 'Canada', countryCode: 'CA',
+    profile: 'BALANCED', lengthKm: 4.361, corners: 14, drsZones: 3, lapSeconds: 74, characteristics: ch(48, 74, 58, 88, 77) },
+
+  /* --- downforce circuits -------------------------------------------- *
+   * Second and third gear all afternoon. Aerodynamic load is everything,
+   * the power unit barely matters, and a train forms behind the leader
+   * because there is nowhere to go. */
+  { id: 'nordhavn', name: 'Nordhavn Ring', city: 'Aalborg', country: 'Denmark', countryCode: 'DK',
+    profile: 'HIGH_DOWNFORCE', lengthKm: 4.381, corners: 14, drsZones: 1, lapSeconds: 77, characteristics: ch(93, 33, 81, 61, 26) },
+  { id: 'rannoch', name: 'Loch Rannoch Circuit', city: 'Perthshire', country: 'United Kingdom', countryCode: 'GB',
+    profile: 'HIGH_DOWNFORCE', lengthKm: 4.673, corners: 17, drsZones: 2, lapSeconds: 80, characteristics: ch(88, 41, 76, 56, 38) },
+  { id: 'kaimai', name: 'Mount Kaimai Raceway', city: 'Tauranga', country: 'New Zealand', countryCode: 'NZ',
+    profile: 'HIGH_DOWNFORCE', lengthKm: 4.259, corners: 20, drsZones: 1, lapSeconds: 76, characteristics: ch(91, 36, 84, 64, 29) },
+  { id: 'vallombra', name: 'Vallombra Hill Circuit', city: 'Terni', country: 'Italy', countryCode: 'IT',
+    profile: 'HIGH_DOWNFORCE', lengthKm: 3.988, corners: 16, drsZones: 1, lapSeconds: 71, characteristics: ch(89, 38, 72, 69, 24) },
+
+  /* --- street circuits ------------------------------------------------ *
+   * Walls, braking zones and no room. The distinguishing number is the
+   * last one: on some of these a pit stop is a decision you cannot take
+   * back, because the position does not come back. */
+  { id: 'kallang', name: 'Kallang Bay Street Circuit', city: 'Singapore', country: 'Singapore', countryCode: 'SG',
+    profile: 'STREET', lengthKm: 4.928, corners: 19, drsZones: 3, lapSeconds: 94, characteristics: ch(86, 42, 64, 91, 21) },
+  { id: 'bahiadorada', name: 'Bahia Dorada Street Circuit', city: 'Valparaiso', country: 'Chile', countryCode: 'CL',
+    profile: 'STREET', lengthKm: 3.337, corners: 18, drsZones: 1, lapSeconds: 72, characteristics: ch(90, 34, 51, 94, 12) },
+  { id: 'strandvei', name: 'Strandvei Harbour Circuit', city: 'Bergen', country: 'Norway', countryCode: 'NO',
+    profile: 'STREET', lengthKm: 6.003, corners: 20, drsZones: 2, lapSeconds: 101, characteristics: ch(54, 86, 49, 87, 68) },
+  { id: 'neonmile', name: 'Neon Mile Street Circuit', city: 'Reno', country: 'United States', countryCode: 'US',
+    profile: 'STREET', lengthKm: 6.115, corners: 17, drsZones: 2, lapSeconds: 97, characteristics: ch(31, 92, 43, 74, 71) },
+  { id: 'medina', name: 'Medina Coast Circuit', city: 'Tangier', country: 'Morocco', countryCode: 'MA',
+    profile: 'STREET', lengthKm: 6.174, corners: 22, drsZones: 3, lapSeconds: 92, characteristics: ch(58, 83, 56, 89, 58) },
+
+  /* --- abrasive and hard on tyres ------------------------------------- *
+   * Rough surfaces and long traction zones. These are the rounds where a
+   * strategy is decided by how long a set will actually last. */
+  { id: 'anatolia', name: 'Anatolia Coastal Circuit', city: 'Antalya', country: 'Turkiye', countryCode: 'TR',
+    profile: 'BALANCED', lengthKm: 5.338, corners: 14, drsZones: 2, lapSeconds: 84, characteristics: ch(69, 62, 89, 66, 64) },
+  { id: 'sakhrah', name: 'Sakhrah Desert Circuit', city: 'Al Ula', country: 'Saudi Arabia', countryCode: 'SA',
+    profile: 'BALANCED', lengthKm: 5.412, corners: 15, drsZones: 3, lapSeconds: 86, characteristics: ch(57, 71, 94, 82, 81) },
+  { id: 'karoo', name: 'Great Karoo Raceway', city: 'Beaufort West', country: 'South Africa', countryCode: 'ZA',
+    profile: 'BALANCED', lengthKm: 4.897, corners: 13, drsZones: 2, lapSeconds: 81, characteristics: ch(52, 76, 91, 59, 72) },
+
+  /* --- the awkward ones ----------------------------------------------- *
+   * Every calendar has a few venues that suit nobody in particular, which
+   * is exactly what makes them worth having on it. */
+  { id: 'montejade', name: 'Monte Jade Circuit', city: 'Hualien', country: 'Chinese Taipei', countryCode: 'TW',
+    profile: 'BALANCED', lengthKm: 5.102, corners: 18, drsZones: 2, lapSeconds: 88, characteristics: ch(74, 55, 68, 77, 45) },
+  { id: 'polderdijk', name: 'Polderdijk Banked Circuit', city: 'Zeeland', country: 'Netherlands', countryCode: 'NL',
+    profile: 'HIGH_DOWNFORCE', lengthKm: 4.259, corners: 15, drsZones: 1, lapSeconds: 73, characteristics: ch(87, 47, 83, 43, 31) },
+  { id: 'tierrafria', name: 'Tierra Fria Autodrome', city: 'Bariloche', country: 'Argentina', countryCode: 'AR',
+    profile: 'BALANCED', lengthKm: 4.472, corners: 15, drsZones: 2, lapSeconds: 77, characteristics: ch(61, 67, 62, 71, 56) },
 ];
 
 /** Characteristic mix implied by a track's profile, with per-track jitter. */
@@ -198,11 +303,13 @@ const WEATHER_POOL = ['DRY', 'DRY', 'CLOUDY', 'CLOUDY', 'LIGHT_RAIN', 'HEAVY_RAI
 export function buildTracks(): Track[] {
   return TRACK_SEEDS.map((seed, index) => {
     const rng = mulberry32(0x5eed + index * 7919);
-    const characteristics = characteristicsFor(seed.profile, rng);
-    // The base circuit keeps its real dimensions; new venues are generated.
+    /* Authored where a circuit has an opinion of its own; derived from
+     * the profile only as a fallback, which now applies to nothing but a
+     * seed somebody adds in a hurry. */
+    const characteristics = seed.characteristics ?? characteristicsFor(seed.profile, rng);
     const lengthKm = seed.isBaseTrack
       ? SUZUKA.lengthKm
-      : Number((3.9 + rng() * 2.5).toFixed(3));
+      : (seed.lengthKm ?? Number((3.9 + rng() * 2.5).toFixed(3)));
     const kind = WEATHER_POOL[Math.floor(rng() * WEATHER_POOL.length)]!;
     const airTempC = round(14 + rng() * 20);
 
@@ -213,13 +320,30 @@ export function buildTracks(): Track[] {
       country: seed.country,
       countryCode: seed.countryCode,
       lengthKm,
-      // Championship distance is a fixed ~305km, as in the real regulations.
-      laps: seed.isBaseTrack ? SUZUKA.laps : Math.max(38, Math.round(305 / lengthKm)),
-      cornerCount: seed.isBaseTrack ? SUZUKA.corners.length + 7 : 10 + Math.floor(rng() * 12),
-      drsZones: seed.isBaseTrack ? SUZUKA.drsZones.length : 1 + Math.floor(rng() * 3),
+      /* Championship distance is a fixed ~305km, as in the real
+       * regulations — except that the regulations also cap the race, and
+       * a short street circuit reaches the two-hour limit long before it
+       * reaches three hundred kilometres. That is why the real short
+       * venues run a shorter race, and why this is capped: a 3.3km lap
+       * was otherwise producing a ninety-one-lap Grand Prix. */
+      laps: seed.isBaseTrack
+        ? SUZUKA.laps
+        : Math.min(78, Math.max(38, Math.round(305 / lengthKm))),
+      cornerCount: seed.isBaseTrack
+        ? SUZUKA.corners.length + 7
+        : (seed.corners ?? 10 + Math.floor(rng() * 12)),
+      drsZones: seed.isBaseTrack
+        ? SUZUKA.drsZones.length
+        : (seed.drsZones ?? 1 + Math.floor(rng() * 3)),
+      /* A lap time authored per circuit rather than derived from its
+       * length alone: a six-kilometre street circuit and a six-kilometre
+       * power circuit are half a minute apart, and deriving from length
+       * made every venue of the same size take the same time to lap. */
       lapRecordMs: seed.isBaseTrack
         ? SUZUKA.lapRecordMs
-        : round(62_000 + lengthKm * 8_600 + rng() * 4_000),
+        : seed.lapSeconds != null
+          ? round(seed.lapSeconds * 1000 + rng() * 900)
+          : round(62_000 + lengthKm * 8_600 + rng() * 4_000),
       profile: seed.profile,
       characteristics,
       forecast: {
