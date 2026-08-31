@@ -3,9 +3,12 @@
  * Steps the simulation in fixed increments and asserts the behaviour the
  * dashboard depends on: ordering, the scripted pass, pit stops, telemetry. */
 
-import { createRaceEngine } from '../src/engine/raceEngine';
+import { TYRE_MODEL, createRaceEngine, tyreWearPenalty } from '../src/engine/raceEngine';
 import { rollRaceWeather, compoundPaceFactor, compoundWearFactor, compoundRiskFactor, bestCompoundFor } from '@/game/weather';
 import { buildTracks } from '@/lib/careerGen';
+import { trackToCircuit } from '@/game/trackAdapter';
+import { GRID_2026_TEAMS, carRating, carRatingAt } from '@/data/grid2026';
+import type { TyreCompound } from '@/types';
 import { SUZUKA } from '../src/data/circuits';
 import { DRIVERS } from '../src/data/drivers';
 import { projectRace, projectStint, pitWindow } from '../src/engine/strategy';
@@ -995,9 +998,21 @@ function raceWith(
   }
   const car = local.getState().cars.find((c) => c.driverId === target)!;
   const mean = laps.length ? laps.reduce((a, b) => a + b, 0) / laps.length : 0;
-  const spread = laps.length
-    ? Math.sqrt(laps.reduce((sum, l) => sum + (l - mean) ** 2, 0) / laps.length)
+
+  /* Scatter measured from one lap to the next rather than from the mean.
+   *
+   * Standard deviation about the mean is not "messy lap to lap": a stint
+   * has a strong systematic trend in it — the car gets lighter every lap
+   * and the tyre gets worse — and over eight laps that trend is larger
+   * than anything a driver's inconsistency contributes. Measured that
+   * way, a rattled driver and a calm one came out identical, because the
+   * number was mostly about fuel. Successive differences cancel any
+   * linear trend and leave the part that is actually the driver. */
+  const jitter = laps.slice(1).map((lap, index) => Math.abs(lap - laps[index]!));
+  const spread = jitter.length
+    ? jitter.reduce((a, b) => a + b, 0) / jitter.length
     : 0;
+
   return { mean, spread, wear: car.tyre.wearPct };
 }
 
@@ -1017,7 +1032,7 @@ check(
 check(
   'and is visibly messier lap to lap',
   firedRun.spread > neutralRun.spread,
-  `±${(firedRun.spread / 1000).toFixed(3)}s vs ±${(neutralRun.spread / 1000).toFixed(3)}s`,
+  `${(firedRun.spread / 1000).toFixed(3)}s lap-to-lap vs ${(neutralRun.spread / 1000).toFixed(3)}s`,
 );
 check(
   'and is harder on the tyres for it',
@@ -1356,6 +1371,252 @@ check(
   `${(oneStop.totalTimeS / 60).toFixed(1)} min`,
 );
 
+
+console.log('\n== the circuit decides the race ==');
+
+{
+  const tracks = buildTracks();
+  const byId = new Map(tracks.map((t) => [t.id, t]));
+
+  /* Every circuit in the catalogue has carried these five numbers since
+   * career mode was written and nothing read any of them. They are what
+   * makes a calendar a calendar. */
+  check(
+    'every circuit states what it asks of a car',
+    tracks.every(
+      (t) =>
+        t.characteristics.downforce > 0 &&
+        t.characteristics.power > 0 &&
+        t.characteristics.overtaking > 0,
+    ),
+    `${tracks.length} venues`,
+  );
+  check(
+    'and they carry through to the engine',
+    Boolean(trackToCircuit(tracks[0]!).characteristics),
+  );
+  check(
+    'the calendar spans real extremes rather than four templates',
+    (() => {
+      const df = tracks.map((t) => t.characteristics.downforce);
+      const ov = tracks.map((t) => t.characteristics.overtaking);
+      return Math.max(...df) - Math.min(...df) > 55 && Math.max(...ov) - Math.min(...ov) > 55;
+    })(),
+    `downforce ${Math.min(...tracks.map((t) => t.characteristics.downforce))}-${Math.max(...tracks.map((t) => t.characteristics.downforce))}, ` +
+      `overtaking ${Math.min(...tracks.map((t) => t.characteristics.overtaking))}-${Math.max(...tracks.map((t) => t.characteristics.overtaking))}`,
+  );
+  check(
+    'no circuit runs an absurd race distance',
+    tracks.every((t) => t.laps >= 38 && t.laps <= 78),
+    `${Math.min(...tracks.map((t) => t.laps))}-${Math.max(...tracks.map((t) => t.laps))} laps`,
+  );
+  check(
+    'lap times differ between circuits of the same length',
+    (() => {
+      const similar = tracks.filter((t) => Math.abs(t.lengthKm - 6) < 0.3);
+      if (similar.length < 2) return true;
+      const times = similar.map((t) => t.lapRecordMs);
+      return Math.max(...times) - Math.min(...times) > 5_000;
+    })(),
+  );
+
+  /* A car is rated for the circuit it is at. Aero-led and power-led cars
+   * are supposed to swap places across a season. */
+  const aeroCar = GRID_2026_TEAMS.find((t) => t.id === 'redbull')!.car;
+  const powerCar = GRID_2026_TEAMS.find((t) => t.id === 'williams')!.car;
+  const downforceTrack = byId.get('kaimai')!.characteristics;
+  const powerTrack = byId.get('lakeshore')!.characteristics;
+
+  check(
+    'an aero car is stronger where downforce matters',
+    carRatingAt(aeroCar, downforceTrack) > carRatingAt(aeroCar, powerTrack),
+    `${carRatingAt(aeroCar, downforceTrack)} vs ${carRatingAt(aeroCar, powerTrack)}`,
+  );
+  check(
+    'and a power car is stronger where it does not',
+    carRatingAt(powerCar, powerTrack) > carRatingAt(powerCar, downforceTrack),
+    `${carRatingAt(powerCar, powerTrack)} vs ${carRatingAt(powerCar, downforceTrack)}`,
+  );
+  check(
+    'the two actually swap order across the calendar',
+    carRatingAt(aeroCar, downforceTrack) > carRatingAt(powerCar, downforceTrack) &&
+      carRatingAt(powerCar, powerTrack) > carRatingAt(aeroCar, powerTrack),
+  );
+  check(
+    'rating a car for a circuit rebalances rather than inflates it',
+    Math.abs(carRatingAt(aeroCar, downforceTrack) - carRating(aeroCar)) <= 6,
+    `flat ${carRating(aeroCar)}, at circuit ${carRatingAt(aeroCar, downforceTrack)}`,
+  );
+  check(
+    'a circuit with no stated character rates as the flat figure',
+    carRatingAt(aeroCar, undefined) === carRating(aeroCar),
+  );
+}
+
+console.log('\n== tyres, and the strategy they allow ==');
+
+{
+  /* The old degradation curve lost 0.042 of a lap per unit of wear,
+   * linearly: nearly a second a lap at a quarter worn. Fresh rubber was
+   * worth so much that stopping again was always right, and optimised
+   * against each other a three-stop beat a one-stop by a minute. */
+  const base = SUZUKA.baseLapTimeMs;
+  const lossAt = (pct: number) => (tyreWearPenalty(pct) * base) / 1000;
+
+  check(
+    'a part-worn set is only tenths off',
+    lossAt(30) < 0.45,
+    `30% worn: ${lossAt(30).toFixed(2)}s/lap`,
+  );
+  check(
+    'a set at the knee is still driveable',
+    lossAt(70) < 0.9,
+    `70% worn: ${lossAt(70).toFixed(2)}s/lap`,
+  );
+  check(
+    'and past it the cliff is real',
+    lossAt(95) > 2.2 && lossAt(100) > lossAt(95) * 1.3,
+    `95%: ${lossAt(95).toFixed(2)}s/lap, 100%: ${lossAt(100).toFixed(2)}s/lap`,
+  );
+  check(
+    'the curve is monotonic',
+    Array.from({ length: 100 }, (_, i) => i).every(
+      (i) => tyreWearPenalty(i + 1) >= tyreWearPenalty(i),
+    ),
+  );
+  check(
+    'the planner projects the same curve the engine runs',
+    (() => {
+      const projected = projectStint('MEDIUM', 20, 3, 1, 0, base);
+      return projected.every((point) => {
+        const expected = (tyreWearPenalty(point.wearPct) * base) / 1000;
+        return Math.abs(point.lapTimeLossS - expected) < 1e-9;
+      });
+    })(),
+  );
+
+  /* The compounds have to be genuinely different things, or the choice
+   * of one is not a choice. */
+  check(
+    'the soft is quicker and the hard lasts longer',
+    TYRE_MODEL.SOFT.paceFactor < TYRE_MODEL.MEDIUM.paceFactor &&
+      TYRE_MODEL.MEDIUM.paceFactor < TYRE_MODEL.HARD.paceFactor &&
+      TYRE_MODEL.SOFT.wearPerLap > TYRE_MODEL.MEDIUM.wearPerLap &&
+      TYRE_MODEL.MEDIUM.wearPerLap > TYRE_MODEL.HARD.wearPerLap,
+  );
+  check(
+    'and the gap between them is tenths rather than seconds',
+    ((TYRE_MODEL.HARD.paceFactor - TYRE_MODEL.SOFT.paceFactor) * base) / 1000 < 1.6,
+    `${(((TYRE_MODEL.HARD.paceFactor - TYRE_MODEL.SOFT.paceFactor) * base) / 1000).toFixed(2)}s soft to hard`,
+  );
+
+  /* The decisive test: optimise each stop count against the others and
+   * see how far apart they land. A minute apart is one strategy and
+   * three wrong answers. */
+  const RACE_LAPS = 53;
+  const PIT_LOSS_S = 21;
+  const stintTimeS = (compound: TyreCompound, laps: number) => {
+    let wear = 0;
+    let total = 0;
+    for (let lap = 0; lap < laps; lap++) {
+      const warmup = lap < TYRE_MODEL[compound].warmupLaps ? 0.012 : 0;
+      total +=
+        (base * TYRE_MODEL[compound].paceFactor * (1 + tyreWearPenalty(wear) + warmup)) / 1000;
+      wear = Math.min(100, wear + TYRE_MODEL[compound].wearPerLap);
+    }
+    return total;
+  };
+
+  const bestForStops = (stops: number) => {
+    const stints = stops + 1;
+    const sets: TyreCompound[][] = [];
+    const build = (acc: TyreCompound[]) => {
+      if (acc.length === stints) return void sets.push(acc);
+      for (const c of ['SOFT', 'MEDIUM', 'HARD'] as TyreCompound[]) build([...acc, c]);
+    };
+    build([]);
+
+    const splits: number[][] = [];
+    const walk = (acc: number[], left: number) => {
+      if (acc.length === stints - 1) return void splits.push([...acc, left]);
+      for (let l = 6; l <= left - 6 * (stints - acc.length - 1); l++) walk([...acc, l], left - l);
+    };
+    walk([], RACE_LAPS);
+
+    let best = Infinity;
+    for (const set of sets) {
+      for (const split of splits) {
+        let total = stops * PIT_LOSS_S;
+        let ok = true;
+        for (let i = 0; i < stints; i++) {
+          if (split[i]! * TYRE_MODEL[set[i]!].wearPerLap > 100) { ok = false; break; }
+          total += stintTimeS(set[i]!, split[i]!);
+        }
+        if (ok && total < best) best = total;
+      }
+    }
+    return best;
+  };
+
+  const plans = [1, 2, 3].map(bestForStops);
+  const spread = Math.max(...plans) - Math.min(...plans);
+  check(
+    'one, two and three stops are all live strategies',
+    spread < 25,
+    `${plans.map((t, i) => `${i + 1}-stop ${(t / 60).toFixed(2)}min`).join(', ')} — ${spread.toFixed(1)}s apart`,
+  );
+  check(
+    'stopping more is not simply always right',
+    plans[2]! > plans[1]!,
+    `3-stop is ${(plans[2]! - plans[1]!).toFixed(1)}s slower than 2-stop`,
+  );
+}
+
+console.log('\n== fuel is loaded for the race ==');
+
+{
+  /* The burn was a fixed 1.92kg a lap against a fixed 110kg tank — fifty-
+   * seven laps of fuel. Any longer race ran dry, and a dry tank tripped
+   * the pit trigger, so cars pitted four and five times on new tyres. */
+  const long = buildTracks().find((t) => t.laps >= 70)!;
+  const circuit = trackToCircuit(long);
+  const local = createRaceEngine({
+    circuit,
+    drivers: DRIVERS,
+    seed: 77,
+    startLap: 0,
+    totalLaps: long.laps,
+  });
+
+  for (let t = 0; t < 40_000 && local.getState().flag !== 'CHEQUERED'; t++) local.step(2000);
+  const finished = local.getState();
+  const running = finished.cars.filter((c) => c.status !== 'RETIRED');
+
+  check(
+    `a ${long.laps}-lap race reaches the flag`,
+    finished.flag === 'CHEQUERED',
+    `leader on lap ${Math.max(...finished.cars.map((c) => c.lap))}`,
+  );
+  check(
+    'nobody runs out of fuel',
+    running.every((c) => c.fuelKg > 0.5),
+    `lowest ${Math.min(...running.map((c) => c.fuelKg)).toFixed(1)}kg`,
+  );
+  check(
+    'and nobody pits more than three times',
+    running.every((c) => c.pitStops <= 3),
+    `most stops ${Math.max(...running.map((c) => c.pitStops))}`,
+  );
+  check(
+    'every car stops at least once over a full distance',
+    running.every((c) => c.pitStops >= 1),
+  );
+  check(
+    'and none of them finishes on a dead set',
+    running.every((c) => c.tyre.wearPct < 95),
+    `worst ${Math.max(...running.map((c) => c.tyre.wearPct)).toFixed(0)}%`,
+  );
+}
 
 console.log('\n== weather: the tyre window ==');
 

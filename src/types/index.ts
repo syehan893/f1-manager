@@ -160,6 +160,28 @@ export interface Circuit {
   /** Sector boundaries as 0-1 progress, ascending. */
   sectorSplits: [number, number];
   startFinishProgress: number;
+  /**
+   * What the circuit asks of a car, 0-100 each.
+   *
+   * Every track in the catalogue has carried these since the career
+   * mode was written and nothing has ever read them, which is why every
+   * circuit raced identically: the quickest car was the quickest car
+   * everywhere, tyres wore at one rate, and a street circuit was a
+   * different picture with the same race behind it.
+   *
+   * They are the whole reason a season is a season rather than the same
+   * Sunday twelve times.
+   */
+  characteristics?: {
+    /** How much of the lap is aerodynamic rather than straight-line. */
+    downforce: number;
+    power: number;
+    /** How hard the surface and the corners are on a set of tyres. */
+    tyreStress: number;
+    braking: number;
+    /** How possible it actually is to pass. Low means track position. */
+    overtaking: number;
+  };
 }
 
 /* ------------------------------ Race state --------------------------- */

@@ -93,6 +93,9 @@ export function trackToCircuit(track: Track): Circuit {
     drsZones: deriveDrsZones(track.drsZones),
     sectorSplits: [1 / 3, 2 / 3],
     startFinishProgress: 0,
+    /* Carried through to the engine, which is new: these were authored
+     * on every circuit in the catalogue and read by nothing at all. */
+    characteristics: { ...track.characteristics },
   };
 }
 

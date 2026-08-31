@@ -11,7 +11,7 @@ import {
   staffReliabilityBonus,
   staffTyreWearMultiplier,
 } from '@/game/staffing';
-import { carRating } from '@/data/grid2026';
+import { carRatingAt } from '@/data/grid2026';
 import { statsForDriver } from '@/game/roster';
 import { driverAdaptationPenalty } from '@/game/driverDevelopment';
 import { isRacePhase } from '@/game/phases';
@@ -87,21 +87,29 @@ export function CareerRaceProvider({ children }: { children: ReactNode }) {
     return Object.keys(map).length > 0 ? map : undefined;
   }, [state]);
 
-  /* Car performance per driver. Without this the race is decided by
-   * driver skill alone and every pound spent in R&D is invisible on a
-   * Sunday, which is the one place it is supposed to show. The race
-   * engineering group adds a little on top for the player's own cars. */
+  /* Car performance per driver, at *this* circuit.
+   *
+   * Without any of this the race is decided by driver skill alone and
+   * every pound spent in R&D is invisible on a Sunday, which is the one
+   * place it is supposed to show. And without the circuit in it, the
+   * quickest car is the quickest car at all twelve rounds — so a season
+   * has one competitive picture instead of twelve. An aero car is a
+   * different proposition at a high-downforce venue than on a power
+   * circuit, and that is what makes the calendar worth reading.
+   *
+   * The race engineering group adds a little on top for our own cars. */
   const carPace = useMemo(() => {
     if (!state) return undefined;
     const engineered = staffRacePaceEdge(state) * 1000;
+    const demands = currentTrack?.characteristics;
     return Object.fromEntries(
       Object.entries(state.driverTeams).map(([driverId, teamId]) => [
         driverId,
-        carRating(statsForDriver(state, driverId)) +
+        carRatingAt(statsForDriver(state, driverId), demands) +
           (teamId === state.playerTeamId ? engineered : 0),
       ]),
     );
-  }, [state]);
+  }, [state, currentTrack]);
 
   /** A strong strategist gets more life out of every set — ours only. */
   const tyreCare = useMemo(() => {

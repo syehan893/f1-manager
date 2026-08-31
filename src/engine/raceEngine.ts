@@ -35,16 +35,67 @@ import {
 } from '@/game/weather';
 import type { RaceWeather } from '@/game/weather';
 
+/* --- the tyres -------------------------------------------------------- *
+ * The compound deltas are deliberately narrower than they were, and the
+ * degradation curve behind them is a different shape entirely.
+ *
+ * The old model lost 0.042 of a lap per unit of wear, linearly. On a
+ * ninety-second lap that is nearly a second a lap at a quarter worn and
+ * two seconds at half worn, which is not degradation, it is a cliff with
+ * no edge. It had one consequence and it was fatal to the strategy game:
+ * fresh rubber was worth so much that stopping again was always right.
+ * Optimised against each other, a three-stop beat a one-stop by fifty-
+ * nine seconds — which is not a choice between strategies, it is one
+ * strategy and three wrong answers.
+ *
+ * Now the loss is gentle and roughly linear to about seventy per cent —
+ * six tenths of a second by the end of a long stint — and then the cliff
+ * arrives properly, four seconds a lap by ninety and eight by the end of
+ * the set. That is the shape that makes a stint length a decision:
+ * running long is cheap right up until it is ruinous.
+ *
+ * Optimised the same way, the stop counts now land within about ten
+ * seconds of each other, and which one wins depends on the circuit
+ * rather than on arithmetic.
+ *
+ * The wear rates came down about a fifth alongside it. They were quoted
+ * per lap with no notion of how long a lap is, so once wear started
+ * scaling with the length of the circuit the whole calendar drifted to
+ * three- and four-stop races. A set now lasts roughly what a real one
+ * does over a Grand Prix distance, which puts most rounds on one or two
+ * stops and leaves three for the circuits that genuinely eat tyres.
+ * --------------------------------------------------------------------- */
 export const TYRE_MODEL: Record<
   TyreCompound,
   { paceFactor: number; wearPerLap: number; warmupLaps: number }
 > = {
-  SOFT: { paceFactor: 0.9855, wearPerLap: 4.4, warmupLaps: 1 },
-  MEDIUM: { paceFactor: 1.0, wearPerLap: 2.9, warmupLaps: 2 },
-  HARD: { paceFactor: 1.0125, wearPerLap: 2.0, warmupLaps: 3 },
-  INTER: { paceFactor: 1.055, wearPerLap: 3.4, warmupLaps: 1 },
-  WET: { paceFactor: 1.12, wearPerLap: 2.6, warmupLaps: 1 },
+  SOFT: { paceFactor: 0.9925, wearPerLap: 3.5, warmupLaps: 1 },
+  MEDIUM: { paceFactor: 1.0, wearPerLap: 2.3, warmupLaps: 2 },
+  HARD: { paceFactor: 1.0065, wearPerLap: 1.6, warmupLaps: 3 },
+  INTER: { paceFactor: 1.042, wearPerLap: 2.7, warmupLaps: 1 },
+  WET: { paceFactor: 1.095, wearPerLap: 2.1, warmupLaps: 1 },
 };
+
+/** Lap time lost per unit of wear before the cliff. */
+const WEAR_LINEAR = 0.010;
+/** Wear fraction at which the cliff starts. */
+export const WEAR_KNEE = 0.70;
+/** How steeply it falls away past the knee. */
+const WEAR_CLIFF = 0.90;
+
+/**
+ * Lap time lost to a worn set, as a fraction of the lap.
+ *
+ * Exported because the strategy planner needs the same curve, and it
+ * had its own — a different linear coefficient, a different knee and a
+ * different cliff, under a comment claiming it was "the same shape the
+ * race engine applies per tick". A planner that models a different race
+ * to the one being run is worse than no planner.
+ */
+export function tyreWearPenalty(wearPct: number): number {
+  const wear = Math.max(0, Math.min(100, wearPct)) / 100;
+  return wear * WEAR_LINEAR + Math.pow(Math.max(0, wear - WEAR_KNEE), 2) * WEAR_CLIFF;
+}
 
 /* --- the pit stop ---------------------------------------------------- *
  * A stop is three distinct things, and modelling it as one linear crawl
@@ -97,7 +148,19 @@ const VSC_MIN_LAPS = 2;
 const VSC_MAX_LAPS = 3;
 /** No VSC inside the last few laps — the race is left to finish. */
 const VSC_ENDGAME_GUARD_LAPS = 2;
-const FUEL_BURN_PER_LAP = 1.92;
+/**
+ * A full race tank, in kilograms. The regulations cap it, and the cars
+ * are built to finish on it whatever the circuit.
+ */
+const RACE_FUEL_KG = 110;
+/**
+ * Headroom over the nominal burn.
+ *
+ * Enough to cover a driver who spends the whole race on the push
+ * multiplier, because a car that runs dry is a car nobody chose to
+ * strand: the team loads for the race they intend to run.
+ */
+const FUEL_MARGIN = 1.16;
 const DRS_GAIN = 0.0062;
 const PUSH_GAIN = 0.0115;
 /**
@@ -480,8 +543,73 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
    * the shortest races. Compressing wear in proportion to the shortening
    * keeps one stop the normal answer at every race length. The cap stops
    * a very short sprint from turning into a three-stop. */
+  /* ---------------------------------------------------------------- *
+   * What this circuit asks for.
+   *
+   * Every track in the catalogue has carried a downforce, power, tyre
+   * stress, braking and overtaking rating since career mode was
+   * written, and not one of them was ever read. Every circuit therefore
+   * raced identically: the same wear, the same passing, the same car in
+   * front at all twelve rounds. These are what make a calendar a
+   * calendar.
+   *
+   * A missing set (an old save, a hand-built test circuit) reads as
+   * neutral, so nothing here can break a race that has no opinion.
+   * ---------------------------------------------------------------- */
+  const character = circuit.characteristics;
+  /** 0.8 at the gentlest circuit, 1.25 at the harshest. */
+  const trackWear = character ? clamp(0.78 + (character.tyreStress / 100) * 0.62, 0.7, 1.4) : 1;
+  /**
+   * How much of a pace advantage it takes to actually get past. 1 is
+   * neutral; a street circuit is nearly twice as hard, a power circuit
+   * with two DRS zones rather easier. This is the term that makes track
+   * position a strategy rather than a consolation.
+   */
+  const passingDifficulty = character
+    ? clamp(1.75 - (character.overtaking / 100) * 1.35, 0.55, 1.85)
+    : 1;
+
+  /* Wear is charged by the lap, so a lap has to have a length.
+   *
+   * A three-kilometre street circuit was taking as much out of a set as
+   * a seven-kilometre one, which is not a small error: it made short
+   * circuits into three- and four-stop races and long ones into one-stop
+   * processions, for no reason anybody could see on the screen. Five
+   * kilometres is the nominal lap the compound figures are quoted
+   * against. */
+  const lapLength = clamp((circuit.lengthKm || 5) / 5, 0.55, 1.6);
+
+  /* ---------------------------------------------------------------- *
+   * Fuel, for the distance.
+   *
+   * The burn was a fixed 1.92kg a lap against a fixed 110kg tank, which
+   * is fifty-seven laps of fuel — so every race longer than that ran the
+   * tank dry, and the dry tank tripped the pit trigger, and the stop put
+   * six kilograms in, which is three more laps. Cars were pitting four
+   * and five times on nearly new tyres and nothing on the screen said
+   * why. Refuelling has been banned since 2010; the car is loaded once,
+   * for the race it is about to run, and that is what this is.
+   * ---------------------------------------------------------------- */
+  /* Consumption is a property of the *circuit*, not of the race being
+   * run: a full Grand Prix distance is about three hundred kilometres
+   * everywhere, so a car burns its tank over the circuit's own full lap
+   * count. A long lap therefore costs more fuel per lap than a short
+   * one, which is the whole reason the numbers differ by venue.
+   *
+   * The margin lives in the rate rather than in the load, because the
+   * load is capped at the tank: putting it there meant a full-distance
+   * race asked for a hundred and twenty-eight kilograms, got a hundred
+   * and ten, and crossed the line dry. */
+  const fuelPerLap = RACE_FUEL_KG / (Math.max(1, circuit.laps) * FUEL_MARGIN);
+  /* And the load matches the race actually being run. A quarter-distance
+   * race is a quarter of the fuel, so a short race is a light car
+   * rather than a Grand Prix car dragging a full tank round a sprint. */
+  const startFuelKg = Math.min(RACE_FUEL_KG, fuelPerLap * raceLaps * FUEL_MARGIN);
+
   const wearScale =
-    options.tyreWearScale ?? clamp(circuit.laps / Math.max(1, raceLaps), 1, 3);
+    (options.tyreWearScale ?? clamp(circuit.laps / Math.max(1, raceLaps), 1, 3)) *
+    trackWear *
+    lapLength;
 
   const internals = new Map<string, CarInternal>();
 
@@ -551,6 +679,60 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
    * genuinely quicker than the paper form suggests. */
   const aiPaceEdge = (aiSkill - 0.5) * 0.016;
 
+  /**
+   * How many stops this car plans, and when.
+   *
+   * It used to plan exactly one, at forty-six per cent distance, for any
+   * race of any length on any circuit — so a seventy-three-lap race on a
+   * compound with forty laps in it was run one stop short, and a third of
+   * the field spent the last twenty laps on a dead set at eight seconds
+   * off. One stop is the right answer often enough that the bug was
+   * invisible until the degradation curve was fixed and the cost of
+   * being wrong became visible.
+   *
+   * Now it starts from the tyre: how many laps the compound has at this
+   * circuit's wear rate decides how many stints the race needs, and the
+   * stops are spaced across it. `stopBias` still moves the whole
+   * sequence earlier or later, which is what puts two cars on the same
+   * number of stops on genuinely different races.
+   */
+  function planStops(compound: TyreCompound, stopBias: number): number[] {
+    const perLap = TYRE_MODEL[compound].wearPerLap * wearScale;
+    /* Target stint: a little past the knee, because the first few laps
+     * over it are cheap and nobody stops on the exact optimum.
+     *
+     * Where passing is hard the target stretches, because the stop is no
+     * longer nearly free: a car that comes out behind traffic at a
+     * street circuit does not get the place back, so a team will nurse a
+     * worse tyre to keep the position. That is the trade a low-
+     * overtaking circuit is *for*, and it is why the same tyres produce
+     * a different race at Monaco and at Monza. */
+    const target = 78 + (passingDifficulty - 1) * 16;
+    const stintLaps = Math.max(4, Math.floor(target / Math.max(0.01, perLap)));
+
+    const stints = Math.max(1, Math.min(4, Math.ceil(raceLaps / stintLaps)));
+    const stops = stints - 1;
+    if (stops <= 0) return [];
+
+    /* A weak strategist scatters its stops around the optimum; a strong
+     * one lands near it. The bias shifts the whole sequence. */
+    const scatter = 1 + (1 - aiSkill) * 6;
+
+    return Array.from({ length: stops }, (_, index) => {
+      const share = (index + 1) / stints;
+      return clamp(
+        Math.round(raceLaps * (share + stopBias * 0.12)) +
+          Math.round((rng() - 0.5) * 2 * scatter),
+        2,
+        Math.max(3, raceLaps - 2),
+      );
+    })
+      .sort((a, b) => a - b)
+      /* Two stops on the same lap is one stop, and a stop on the lap
+       * after another is a double pit for no reason. */
+      .filter((lap, index, all) => index === 0 || lap > all[index - 1]! + 2);
+  }
+
   const cars: CarState[] = drivers.map((driver, index) => {
     const attrs = driver.attributes;
     // Blend of raw driver ability and a little car-dependent randomness.
@@ -563,9 +745,17 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
 
     /* The car is worth more than the driver over a race distance, which
      * is what makes development the point of the management game. 70 is
-     * the neutral package; better than that is time, worse is time lost. */
+     * the neutral package; better than that is time, worse is time lost.
+     *
+     * The coefficient came down from 0.0016. Across a fourteen-point
+     * field that was two seconds a lap of car alone, and with the driver
+     * term on top the best-lap spread ran to four seconds — half again
+     * what the real thing produces, and enough that the same team won
+     * nine races out of twelve whatever the circuit asked for. The car
+     * still decides more than the driver; it just no longer decides the
+     * race before the lights go out. */
     const packageRating = options.carPace?.[driver.id] ?? 70;
-    const carDelta = (70 - packageRating) * 0.0016;
+    const carDelta = (70 - packageRating) * 0.00118;
 
     const isAi = !manualPit.has(driver.id);
 
@@ -588,7 +778,7 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
     const plan = isAi ? strategyFor(packageRating) : { stopBias: 0, compoundBias: 0 };
     const paceFactor =
       1 +
-      (1 - skill) * 0.085 +
+      (1 - skill) * 0.072 +
       carDelta +
       (isAi ? -aiPaceEdge : 0) +
       (rng() - 0.5) * 0.004;
@@ -636,14 +826,7 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       plannedPitLaps: (options.manualPitDriverIds ?? []).includes(driver.id)
         ? []
         : startLap === 0
-          ? [
-              clamp(
-                Math.round(raceLaps * (0.46 + plan.stopBias * 0.16)) +
-                  Math.round((rng() - 0.5) * 2 * (1 + (1 - aiSkill) * 6)),
-                3,
-                Math.max(4, raceLaps - 3),
-              ),
-            ]
+          ? planStops(compound, plan.stopBias)
           : [startLap + 4 + Math.floor(rng() * 10), stintLap + 20],
       nextCompound:
         plan.compoundBias < -0.35
@@ -740,7 +923,7 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       },
       nextCompound: internals.get(driver.id)!.nextCompound,
       pitRequested: false,
-      fuelKg: Math.max(12, 110 - startLap * FUEL_BURN_PER_LAP + rng() * 3),
+      fuelKg: Math.max(4, startFuelKg - startLap * fuelPerLap + rng() * 2),
       status: 'LAPPING' as DriverStatus,
       pitStops: startLap > 12 ? 1 : 0,
       pitProgress: 0,
@@ -816,7 +999,7 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
         t: startElapsedMs - k * 1000,
         lap: car.lap,
         tyreWearPct: clamp(car.tyre.wearPct - lapsAgo * wearPerLap, 0, 100),
-        fuelKg: Math.min(110, car.fuelKg + lapsAgo * FUEL_BURN_PER_LAP),
+        fuelKg: Math.min(startFuelKg, car.fuelKg + lapsAgo * fuelPerLap),
         speedKph: 232 + phase * 74,
         throttlePct: clamp(58 + phase * 42, 0, 100),
         brakePct: clamp(100 - (58 + phase * 42) - 18, 0, 100),
@@ -860,13 +1043,15 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
     const tyre = TYRE_MODEL[car.tyre.compound];
 
     // Degradation is mild until the cliff, then it bites.
-    const wear = car.tyre.wearPct / 100;
-    const wearPenalty = wear * 0.042 + Math.pow(Math.max(0, wear - 0.72), 2) * 0.55;
+    const wearPenalty = tyreWearPenalty(car.tyre.wearPct);
 
     // Cold tyres on an out lap.
     const warmup = car.tyre.ageLaps < tyre.warmupLaps ? 0.012 : 0;
 
-    // Fuel weight: ~0.032s per kg over a 92s lap.
+    /* Fuel weight: ~0.032s per kg over a 92s lap, so a full tank is
+     * about three seconds a lap slower than an empty one. Now that the
+     * load is sized to the race rather than fixed, that means the same
+     * thing at a forty-lap circuit and a seventy-eight-lap one. */
     const fuelPenalty = car.fuelKg * 0.00035;
 
     /* The conditions. A tyre outside its window is the single largest
@@ -881,11 +1066,14 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       tyre.paceFactor *
       (1 + wearPenalty + fuelPenalty + warmup + conditionPenalty);
 
-    // DRS: needs a zone and a car within a second.
+    /* DRS: needs a zone and a car within a second. What it is worth
+     * depends on the circuit — a long straight into a braking zone is a
+     * different proposition to a street course where the zone ends at a
+     * ninety-degree left. */
     if (ahead && car.gapToAheadMs > 0 && car.gapToAheadMs < 1000) {
       const zoneHit = circuit.drsZones.some((z) => inZone(car.lapProgress, z.start, z.end));
-      if (zoneHit) factor -= DRS_GAIN;
-      factor -= 0.0022; // slipstream
+      if (zoneHit) factor -= DRS_GAIN / passingDifficulty;
+      factor -= 0.0022 / passingDifficulty; // slipstream
     }
 
     /* The duel. A car in range is not simply following — it is being
@@ -899,7 +1087,9 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
          * one-point-three. */
         const proximity = 1 - car.gapToAheadMs / DUEL_RANGE_MS;
         const contest = clamp(defender.defence - internal.attack + 0.5, 0, 1);
-        factor += DEFENCE_MAX_PENALTY * contest * proximity;
+        /* Being held up costs more where passing is hard, which is the
+         * other half of what makes track position worth pitting for. */
+        factor += DEFENCE_MAX_PENALTY * contest * proximity * passingDifficulty;
       }
     }
 
@@ -1014,7 +1204,10 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       wearPct: 0,
       temperatureC: 78,
     };
-    car.fuelKg = Math.min(110, car.fuelKg + 6);
+    /* No fuel goes in. Refuelling has been banned for the whole life of
+     * this regulation set — the six kilograms this used to add were the
+     * only thing keeping a long race from running dry, and they were
+     * hiding a badly sized tank rather than modelling anything. */
 
     pushIncident(state, {
       id: `inc-${eventSeq++}`,
@@ -1352,7 +1545,7 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
       );
       car.fuelKg = Math.max(
         0.4,
-        car.fuelKg - delta * FUEL_BURN_PER_LAP * (car.attacking ? PUSH_FUEL_MULTIPLIER : 1),
+        car.fuelKg - delta * fuelPerLap * (car.attacking ? PUSH_FUEL_MULTIPLIER : 1),
       );
 
       // Push spends the store slowly; the override empties it.
@@ -1494,8 +1687,15 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
        * A car under manual control has no strategy of its own. It runs
        * until the pit wall says otherwise, however bad the tyres get. */
       /* A sharper AI reacts to the tyre in front of it rather than only
-       * to the number it wrote down before the race. */
-      const wearTrigger = 92 - internal.racecraft * 14;
+       * to the number it wrote down before the race.
+       *
+       * The trigger used to sit between 78 and 92 per cent, which was
+       * survivable when degradation was linear and is not now: the cliff
+       * starts at seventy, so a car waiting for ninety-two has already
+       * given away four seconds a lap for a dozen laps. It now sits
+       * either side of the knee — a good team comes in just before it,
+       * a poor one just after. */
+      const wearTrigger = WEAR_KNEE * 100 + 8 - internal.racecraft * 16;
       /* Conditions override every other reason to stop. A car on the
        * wrong tyre for the track is losing seconds a lap and is about to
        * put it in the wall, so it comes in whatever the plan said — a
@@ -1507,8 +1707,7 @@ export function createRaceEngine(options: RaceEngineOptions): RaceEngine {
         ? internal.plannedPitLaps.includes(car.lap)
         : strandedOnWrongTyre ||
           internal.plannedPitLaps.includes(car.lap) ||
-          car.tyre.wearPct > wearTrigger ||
-          car.fuelKg < 3;
+          car.tyre.wearPct > wearTrigger;
       /* Keep the readouts on the car itself honest: the queued compound
        * and whether a stop is pending are both things the pit wall has to
        * be able to see without guessing. */

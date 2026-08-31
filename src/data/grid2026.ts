@@ -88,7 +88,7 @@ export const GRID_2026_TEAMS: GridTeam[] = [
     principal: 'Laurent Mekies',
     engineSupplier: 'Red Bull Ford Powertrains',
     budget: 142_000_000,
-    car: { pace: 92, aero: 93, powerUnit: 87, electrical: 86, reliability: 84, pitCrew: 95, brakes: 92, suspension: 92, cooling: 85 },
+    car: { pace: 92, aero: 97, powerUnit: 82, electrical: 84, reliability: 85, pitCrew: 95, brakes: 93, suspension: 94, cooling: 81 },
     prestige: 95,
     hiringBar: 87,
   },
@@ -104,7 +104,7 @@ export const GRID_2026_TEAMS: GridTeam[] = [
     principal: 'Frédéric Vasseur',
     engineSupplier: 'Ferrari',
     budget: 140_000_000,
-    car: { pace: 93, aero: 91, powerUnit: 92, electrical: 90, reliability: 88, pitCrew: 89, brakes: 92, suspension: 91, cooling: 89 },
+    car: { pace: 93, aero: 90, powerUnit: 94, electrical: 91, reliability: 87, pitCrew: 89, brakes: 95, suspension: 91, cooling: 90 },
     prestige: 97,
     hiringBar: 86,
   },
@@ -120,7 +120,7 @@ export const GRID_2026_TEAMS: GridTeam[] = [
     principal: 'Toto Wolff',
     engineSupplier: 'Mercedes',
     budget: 139_000_000,
-    car: { pace: 94, aero: 90, powerUnit: 95, electrical: 94, reliability: 90, pitCrew: 91, brakes: 92, suspension: 91, cooling: 92 },
+    car: { pace: 93, aero: 86, powerUnit: 99, electrical: 97, reliability: 91, pitCrew: 91, brakes: 91, suspension: 89, cooling: 95 },
     prestige: 94,
     hiringBar: 85,
   },
@@ -136,7 +136,7 @@ export const GRID_2026_TEAMS: GridTeam[] = [
     principal: 'Andrea Stella',
     engineSupplier: 'Mercedes',
     budget: 138_000_000,
-    car: { pace: 95, aero: 95, powerUnit: 93, electrical: 92, reliability: 91, pitCrew: 93, brakes: 95, suspension: 94, cooling: 92 },
+    car: { pace: 95, aero: 98, powerUnit: 88, electrical: 90, reliability: 92, pitCrew: 93, brakes: 96, suspension: 97, cooling: 88 },
     prestige: 93,
     hiringBar: 84,
   },
@@ -152,7 +152,7 @@ export const GRID_2026_TEAMS: GridTeam[] = [
     principal: 'Andy Cowell',
     engineSupplier: 'Honda',
     budget: 128_000_000,
-    car: { pace: 87, aero: 89, powerUnit: 86, electrical: 85, reliability: 83, pitCrew: 85, brakes: 88, suspension: 87, cooling: 84 },
+    car: { pace: 86, aero: 94, powerUnit: 80, electrical: 82, reliability: 84, pitCrew: 85, brakes: 89, suspension: 91, cooling: 80 },
     prestige: 76,
     hiringBar: 72,
   },
@@ -168,7 +168,7 @@ export const GRID_2026_TEAMS: GridTeam[] = [
     principal: 'James Vowles',
     engineSupplier: 'Mercedes',
     budget: 110_000_000,
-    car: { pace: 86, aero: 84, powerUnit: 94, electrical: 92, reliability: 82, pitCrew: 82, brakes: 85, suspension: 84, cooling: 86 },
+    car: { pace: 86, aero: 81, powerUnit: 97, electrical: 95, reliability: 83, pitCrew: 82, brakes: 85, suspension: 82, cooling: 91 },
     prestige: 74,
     hiringBar: 64,
   },
@@ -184,7 +184,7 @@ export const GRID_2026_TEAMS: GridTeam[] = [
     principal: 'Jonathan Wheatley',
     engineSupplier: 'Audi',
     budget: 125_000_000,
-    car: { pace: 84, aero: 83, powerUnit: 82, electrical: 84, reliability: 79, pitCrew: 80, brakes: 84, suspension: 82, cooling: 80 },
+    car: { pace: 85, aero: 88, powerUnit: 76, electrical: 79, reliability: 79, pitCrew: 80, brakes: 86, suspension: 87, cooling: 76 },
     prestige: 66,
     hiringBar: 60,
   },
@@ -200,7 +200,7 @@ export const GRID_2026_TEAMS: GridTeam[] = [
     principal: 'Alan Permane',
     engineSupplier: 'Red Bull Ford Powertrains',
     budget: 98_000_000,
-    car: { pace: 84, aero: 83, powerUnit: 87, electrical: 85, reliability: 84, pitCrew: 84, brakes: 84, suspension: 82, cooling: 85 },
+    car: { pace: 84, aero: 84, powerUnit: 85, electrical: 85, reliability: 84, pitCrew: 84, brakes: 84, suspension: 84, cooling: 84 },
     prestige: 62,
     hiringBar: 56,
   },
@@ -216,7 +216,7 @@ export const GRID_2026_TEAMS: GridTeam[] = [
     principal: 'Ayao Komatsu',
     engineSupplier: 'Ferrari',
     budget: 92_000_000,
-    car: { pace: 81, aero: 79, powerUnit: 92, electrical: 89, reliability: 81, pitCrew: 79, brakes: 80, suspension: 79, cooling: 84 },
+    car: { pace: 81, aero: 74, powerUnit: 94, electrical: 90, reliability: 82, pitCrew: 79, brakes: 90, suspension: 77, cooling: 88 },
     prestige: 56,
     hiringBar: 50,
   },
@@ -232,7 +232,7 @@ export const GRID_2026_TEAMS: GridTeam[] = [
     principal: 'Steve Nielsen',
     engineSupplier: 'Mercedes',
     budget: 106_000_000,
-    car: { pace: 80, aero: 80, powerUnit: 93, electrical: 91, reliability: 78, pitCrew: 81, brakes: 80, suspension: 79, cooling: 82 },
+    car: { pace: 80, aero: 75, powerUnit: 96, electrical: 94, reliability: 78, pitCrew: 81, brakes: 79, suspension: 76, cooling: 89 },
     prestige: 64,
     hiringBar: 54,
   },
@@ -248,7 +248,7 @@ export const GRID_2026_TEAMS: GridTeam[] = [
     principal: 'Graeme Lowdon',
     engineSupplier: 'Ferrari',
     budget: 118_000_000,
-    car: { pace: 74, aero: 72, powerUnit: 92, electrical: 88, reliability: 71, pitCrew: 70, brakes: 73, suspension: 72, cooling: 77 },
+    car: { pace: 74, aero: 68, powerUnit: 95, electrical: 91, reliability: 71, pitCrew: 70, brakes: 72, suspension: 69, cooling: 80 },
     prestige: 44,
     hiringBar: 38,
   },
@@ -369,4 +369,78 @@ export function carRating(car: CarStats): number {
       car.suspension * 0.05 +
       car.cooling * 0.04,
   );
+}
+
+/** What a circuit asks of a car, 0-100 each. */
+export interface TrackDemands {
+  downforce: number;
+  power: number;
+  tyreStress: number;
+  braking: number;
+  overtaking: number;
+}
+
+/**
+ * The same car, rated for one particular circuit.
+ *
+ * `carRating` above is the constructor's headline figure — one number
+ * for the tables, the market and the comparisons that talk about a team
+ * rather than a weekend. It is a fixed weighted average, which means
+ * that on its own the quickest car is the quickest car everywhere, and a
+ * twelve-round championship is the same Sunday twelve times.
+ *
+ * This is the weekend figure. The weights shift with what the track
+ * actually asks for: an aero car is a different proposition at a
+ * high-downforce circuit than on a power track, and a car with the
+ * strongest brakes in the field gets to use them at some venues and not
+ * at others. The total weight is held constant, so this rebalances a car
+ * rather than inflating it — the field average is unchanged and only the
+ * order within it moves.
+ *
+ * That is what makes development a series of choices rather than one
+ * slider, and what makes a bad car at one circuit a good car at another.
+ */
+export function carRatingAt(car: CarStats, track: TrackDemands | undefined): number {
+  if (!track) return carRating(car);
+
+  /* −1 to +1 around a neutral circuit. 60 is the middle of the authored
+   * range rather than 50: the catalogue's circuits cluster above the
+   * midpoint on most axes, and centring on the data keeps a nominal
+   * track genuinely neutral. */
+  const lean = (value: number) => Math.max(-1, Math.min(1, (value - 60) / 40));
+
+  const aeroLean = lean(track.downforce);
+  const powerLean = lean(track.power);
+  const brakeLean = lean(track.braking);
+  const stressLean = lean(track.tyreStress);
+
+  /* `pace` is the part of a car that is quick everywhere, so it does not
+   * move. Everything else does, and by enough to actually reorder a
+   * field: a swing of a tenth of the total weight against a car that is
+   * ten points stronger in aero than in power is worth two or three
+   * points of rating, which is the difference between second and fifth. */
+  const weights = {
+    pace: 0.26,
+    aero: 0.18 + aeroLean * 0.15,
+    powerUnit: 0.15 + powerLean * 0.14,
+    electrical: 0.14 + powerLean * 0.06,
+    reliability: 0.08,
+    brakes: 0.05 + brakeLean * 0.07,
+    // Mechanical grip is what survives a circuit that eats tyres.
+    suspension: 0.05 + stressLean * 0.07,
+    cooling: 0.04 + Math.max(0, powerLean) * 0.03,
+  };
+
+  const total = Object.values(weights).reduce((sum, w) => sum + w, 0);
+  const scored =
+    car.pace * weights.pace +
+    car.aero * weights.aero +
+    car.powerUnit * weights.powerUnit +
+    car.electrical * weights.electrical +
+    car.reliability * weights.reliability +
+    car.brakes * weights.brakes +
+    car.suspension * weights.suspension +
+    car.cooling * weights.cooling;
+
+  return Math.round(scored / total);
 }
