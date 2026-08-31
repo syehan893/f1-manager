@@ -23,6 +23,8 @@ export type SocialTopic =
   | 'TEAM'
   /** How a driver is feeling — complaints and satisfaction alike. */
   | 'MOOD'
+  /** The feeder series: who is winning it, and who is being watched. */
+  | 'YOUTH'
   | 'RUMOUR';
 
 export interface SocialPost {
@@ -54,6 +56,7 @@ export const SOCIAL_TOPIC_LABEL: Record<SocialTopic, string> = {
   CONTRACT: 'Contracts',
   TEAM: 'Teams',
   MOOD: 'Drivers',
+  YOUTH: 'Feeder series',
   RUMOUR: 'Rumours',
 };
 

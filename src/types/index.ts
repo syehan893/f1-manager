@@ -414,6 +414,7 @@ export type ViewId =
   /* Career mode */
   | 'career-season'
   | 'career-market'
+  | 'career-youth'
   | 'career-rnd'
   | 'career-calendar'
   | 'career-mail'

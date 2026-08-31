@@ -1,5 +1,5 @@
 import { GRID_2026_TEAMS, driverRating } from '@/data/grid2026';
-import { effectiveDriver } from './driverDevelopment';
+import { blankRecord, effectiveDriver } from './driverDevelopment';
 import { joinSquad, leaveSquad, raceDriversOf } from './roster';
 import type { GameState, TransferMove } from './types';
 
@@ -265,15 +265,7 @@ export function applyTransferMoves(state: GameState, moves: TransferMove[]): voi
     if (!state.driverRecords[move.incomingDriverId]) {
       const prospect = state.prospects.find((entry) => entry.id === move.incomingDriverId);
       if (prospect) {
-        state.driverRecords[prospect.id] = {
-          driverId: prospect.id,
-          age: prospect.age,
-          deltas: {},
-          seasonsRun: 0,
-          careerPoints: 0,
-          careerWins: 0,
-          careerPodiums: 0,
-        };
+        state.driverRecords[prospect.id] = blankRecord(prospect.id, prospect.age);
       }
     }
   }

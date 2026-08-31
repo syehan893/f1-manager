@@ -1,4 +1,4 @@
-import { GRID_2026_DRIVERS, GRID_2026_TEAMS } from '@/data/grid2026';
+import { GRID_2026_DRIVERS, GRID_2026_TEAMS, driverRating } from '@/data/grid2026';
 import { buildComponents, buildTracks } from '@/lib/careerGen';
 import { sponsorById } from '@/data/sponsors';
 import { RND_COST_PER_POINT, RND_STAT_CEILING } from './machineConstants';
@@ -50,6 +50,7 @@ import {
   askingTerms,
   dealFor,
   dealFromOffer,
+  expiringDeals,
   judgeOffer,
   openNegotiation,
   releaseCost,
@@ -60,20 +61,34 @@ import { postMail } from './mail';
 import { driverGarageMail, mechanicSummary } from './garageMail';
 import {
   announceContract,
+  announceF2Season,
   announceQualifying,
   announceRace,
+  announceRetirement,
   announceSillySeason,
   announceTransfer,
+  announceTransferNote,
   championshipPosts,
   driverMoodPosts,
   rumourPosts,
 } from './paddockFeed';
 import {
   advanceDriverSeason,
-  buildProspects,
+  blankRecord,
   effectiveDriver,
   seedDriverRecords,
+  tallyOf,
 } from './driverDevelopment';
+import { buildF2Field, regenerateF2Field, simulateF2Season } from './feederSeries';
+import {
+  emptyPlayerSeats,
+  isFreeAgent,
+  promoteJunior,
+  refillGrid,
+  runAttrition,
+  runContractExpiries,
+  runRetirements,
+} from './offSeason';
 import { developAiCars, developAiPreSeason } from './aiDevelopment';
 import {
   CONDITION_EVENTS,
@@ -225,6 +240,7 @@ const MANAGEMENT_ACTIONS: GameEventType[] = [
   'UPGRADE_FACILITY',
   'SWAP_DRIVER',
   'SIGN_PROSPECT',
+  'SIGN_FREE_AGENT',
   'HIRE_STAFF',
   'RELEASE_STAFF',
   'SET_STRATEGY',
@@ -392,7 +408,31 @@ export function createNewGame(managerName = 'New Manager'): GameState {
       );
       return map;
     }, {}),
-    deals: {},
+    /* Real contracts for the whole grid, from the terms the data file
+     * already carries.
+     *
+     * This used to be empty, and `dealFor` synthesised a deal on demand
+     * from the same data whenever anybody asked. That reads like the
+     * same thing and is not: a synthesised deal is recomputed from the
+     * static file every time, so it never ran down and never expired.
+     * The entire starting grid was therefore on contracts that could not
+     * end, and an "out of contract" driver kept racing indefinitely.
+     * Written down once, at the start, they are deals like any other. */
+    deals: Object.fromEntries(
+      GRID_2026_DRIVERS.map((driver) => [
+        driver.id,
+        {
+          driverId: driver.id,
+          teamId: driver.teamId,
+          salary: driver.contract.salaryPerSeason,
+          seasonsRemaining: Math.max(1, driver.contract.expiresAfterSeason - 2026 + 1),
+          signedInSeason: 2026,
+          signingBonus: 0,
+          buyoutClause: driver.contract.buyoutClause,
+          role: 'RACE' as const,
+        },
+      ]),
+    ),
     negotiations: [],
     transferList: [],
     transferOffers: [],
@@ -439,11 +479,17 @@ export function createNewGame(managerName = 'New Manager'): GameState {
     driverConditions: Object.fromEntries(
       GRID_2026_DRIVERS.map((driver) => [driver.id, blankCondition(driver.id, driver.morale)]),
     ),
-    prospects: buildProspects(2026),
+    /* The feeder series, which is where every future driver comes from.
+     * A full grid rather than a handful of cards: the player signs out
+     * of a championship they have been able to watch. */
+    prospects: buildF2Field(2026),
+    f2: null,
+    f2Archive: [],
     academyDrivers: [],
     mail: [],
     social: [],
     seasonArchive: [],
+    retiredDriverIds: [],
     pendingGridPenalty: 0,
   };
 }
@@ -649,8 +695,21 @@ function clone(state: GameState): GameState {
     },
     lastTransferWindow: state.lastTransferWindow.map((move) => ({ ...move })),
     staff: state.staff.map((entry) => ({ ...entry })),
+    /* Deep, not shallow. A record's `deltas` is the object the whole
+     * ageing curve writes into, and `advanceDriverSeason` assigns
+     * straight onto it — so a shallow copy left the previous state's
+     * deltas being mutated in place, and running the same rollover
+     * twice from the same save produced two different grids. */
     driverRecords: Object.fromEntries(
-      Object.entries(state.driverRecords).map(([key, record]) => [key, { ...record }]),
+      Object.entries(state.driverRecords).map(([key, record]) => [
+        key,
+        {
+          ...record,
+          deltas: { ...record.deltas },
+          season: record.season ? { ...record.season } : record.season,
+          ratingHistory: [...(record.ratingHistory ?? [])],
+        },
+      ]),
     ),
     driverConditions: Object.fromEntries(
       Object.entries(state.driverConditions).map(([key, entry]) => [key, { ...entry }]),
@@ -669,6 +728,14 @@ function clone(state: GameState): GameState {
       constructors: entry.constructors.map((row) => ({ ...row })),
       rounds: entry.rounds.map((row) => ({ ...row })),
     })),
+    f2: state.f2
+      ? { ...state.f2, standings: state.f2.standings.map((row) => ({ ...row })) }
+      : null,
+    f2Archive: (state.f2Archive ?? []).map((entry) => ({
+      ...entry,
+      standings: entry.standings.map((row) => ({ ...row })),
+    })),
+    retiredDriverIds: [...(state.retiredDriverIds ?? [])],
   };
 }
 
@@ -1322,15 +1389,10 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
       }
       if (!next.driverRecords[negotiation.driverId]) {
         const driver = DRIVER_BY_ID[negotiation.driverId];
-        next.driverRecords[negotiation.driverId] = {
-          driverId: negotiation.driverId,
-          age: driver?.age ?? 26,
-          deltas: {},
-          seasonsRun: 0,
-          careerPoints: 0,
-          careerWins: 0,
-          careerPodiums: 0,
-        };
+        next.driverRecords[negotiation.driverId] = blankRecord(
+          negotiation.driverId,
+          driver?.age ?? 26,
+        );
       }
 
       announceTransfer(next, {
@@ -1679,6 +1741,40 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         next.qualifying = event.result;
       }
 
+      /* Poles and the team-mate head-to-head, for the winter.
+       *
+       * Qualifying is the purest read on a driver there is — the same
+       * car, one lap, no strategy and no luck — which is why the
+       * development curve weighs it as heavily as the points. */
+      {
+        const entries = next.qualifying?.entries ?? [];
+        const poleSitter = entries.find((entry) => entry.position === 1);
+        if (poleSitter) {
+          const record = next.driverRecords[poleSitter.driverId];
+          if (record) record.season = { ...tallyOf(record), poles: tallyOf(record).poles + 1 };
+        }
+
+        const positionOf = new Map(entries.map((entry) => [entry.driverId, entry.position]));
+        for (const team of next.teams) {
+          const [first, second] = raceDriversOf(next, team.teamId);
+          if (!first || !second) continue;
+          const a = positionOf.get(first);
+          const b = positionOf.get(second);
+          if (a == null || b == null) continue;
+
+          for (const [driverId, beat] of [[first, a < b], [second, b < a]] as const) {
+            const record = next.driverRecords[driverId];
+            if (!record) continue;
+            const tally = tallyOf(record);
+            record.season = {
+              ...tally,
+              qualifyingDuels: tally.qualifyingDuels + 1,
+              qualifyingWins: tally.qualifyingWins + (beat ? 1 : 0),
+            };
+          }
+        }
+      }
+
       /* Saturday is the first thing that moves a driver all weekend, and
        * it moves them hard: being out-qualified by a team-mate is the
        * comparison every driver actually measures themselves against. */
@@ -1837,29 +1933,13 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
 
       // A released driver becomes a free agent rather than vanishing.
       if (releasing) leaveSquad(next, releasing);
-      joinSquad(next, prospect.id, next.playerTeamId!);
 
-      /* Straight into the seat the released driver vacated; otherwise
-       * wherever there is room, which on a full line-up is the bench. */
-      next.deals[prospect.id] = {
-        driverId: prospect.id,
-        teamId: next.playerTeamId!,
-        salary: prospect.salary,
-        seasonsRemaining: 3,
-        signedInSeason: next.season,
-        signingBonus: 0,
-        buyoutClause: Math.round(prospect.salary * 2.2),
-        role: raceDriversOf(next, next.playerTeamId).includes(prospect.id)
-          ? 'RACE'
-          : 'RESERVE',
-      };
-
-      /* The intake is rebuilt every season, so a graduate has to be kept
-       * somewhere that survives the new year — otherwise they hold a seat
-       * that names nobody and disappear from every screen. */
-      if (!next.academyDrivers.some((entry) => entry.id === prospect.id)) {
-        next.academyDrivers.push({ ...prospect, attributes: { ...prospect.attributes } });
-      }
+      /* One promotion path for the player and the AI both: it joins the
+       * squad, writes the contract, keeps a durable copy of the driver,
+       * and — the part that is easy to forget in a second copy of this
+       * code — takes them out of the feeder series and generates
+       * somebody new into the seat they vacated there. */
+      promoteJunior(next, prospect, next.playerTeamId!);
 
       if (!next.driverConditions[prospect.id]) {
         // A junior arrives keen and largely unbothered by anything yet.
@@ -1867,15 +1947,7 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
       }
 
       if (!next.driverRecords[prospect.id]) {
-        next.driverRecords[prospect.id] = {
-          driverId: prospect.id,
-          age: prospect.age,
-          deltas: {},
-          seasonsRun: 0,
-          careerPoints: 0,
-          careerWins: 0,
-          careerPodiums: 0,
-        };
+        next.driverRecords[prospect.id] = blankRecord(prospect.id, prospect.age);
       }
 
       post(next, 'TRANSFER', `Signed ${prospect.firstName} ${prospect.lastName}`, -fee);
@@ -1886,8 +1958,78 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         toTeamId: next.playerTeamId!,
         fee,
         salary: prospect.salary,
-        seasons: 3,
+        seasons: next.deals[prospect.id]?.seasonsRemaining ?? 3,
         role: next.deals[prospect.id]!.role,
+      });
+      break;
+    }
+
+    /* ------------------------------ free agents ------------------------ */
+
+    case 'SIGN_FREE_AGENT': {
+      if (!next.playerTeamId) return refuse('No team selected.');
+      if (!isFreeAgent(next, event.driverId)) {
+        return refuse('That driver is not a free agent.');
+      }
+      if (!squadHasRoom(next, next.playerTeamId)) {
+        return refuse(
+          `Your squad is full at ${MAX_SQUAD_SIZE} drivers. Release somebody before signing another.`,
+        );
+      }
+
+      const team = next.teams.find((entry) => entry.teamId === next.playerTeamId);
+      if (!team) return refuse('No team selected.');
+
+      const driver = effectiveDriver(next, event.driverId);
+      if (!driver) return refuse('That driver cannot be found.');
+
+      /* A free agent costs no transfer fee — that is the whole appeal of
+       * one — but they still want a wage, and they know what they are
+       * worth. A season of salary is payable up front. */
+      const rating = driverRating(driver);
+      const salary =
+        Math.round((1_200_000 + Math.pow(Math.max(0, rating - 55), 2.1) * 5_400) / 100_000) *
+        100_000;
+      if (team.budget < salary) {
+        return refuse(
+          `${driver.lastName} wants ${formatMillions(salary)} a season; you have ${formatMillions(team.budget)}.`,
+        );
+      }
+
+      joinSquad(next, event.driverId, next.playerTeamId);
+      next.deals[event.driverId] = {
+        driverId: event.driverId,
+        teamId: next.playerTeamId,
+        salary,
+        seasonsRemaining: 2,
+        signedInSeason: next.season,
+        signingBonus: 0,
+        buyoutClause: Math.round(salary * 1.6),
+        role: raceDriversOf(next, next.playerTeamId).includes(event.driverId)
+          ? 'RACE'
+          : 'RESERVE',
+      };
+
+      if (!next.driverConditions[event.driverId]) {
+        /* Somebody who has been out of a drive is glad of one, and a
+         * little rusty — which is a different starting point to a junior
+         * arriving on a wave of promise. */
+        next.driverConditions[event.driverId] = blankCondition(event.driverId, 74);
+      }
+      if (!next.driverRecords[event.driverId]) {
+        next.driverRecords[event.driverId] = blankRecord(event.driverId, driver.age);
+      }
+
+      post(next, 'SALARY', `Signed ${driver.firstName} ${driver.lastName}`, -salary);
+
+      announceTransfer(next, {
+        driverId: event.driverId,
+        fromTeamId: '',
+        toTeamId: next.playerTeamId,
+        fee: 0,
+        salary,
+        seasons: 2,
+        role: next.deals[event.driverId]!.role,
       });
       break;
     }
@@ -1973,6 +2115,35 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
     case 'RACE_COMPLETE': {
       next.lastRace = event.result;
       next.standings = applyRaceResult(next.standings, event.result);
+
+      /* The season's ledger for each driver.
+       *
+       * Development used to be judged on one number — share of the
+       * team's points — which meant a driver in a car that scored
+       * nothing produced no evidence at all, and four poles followed by
+       * four retirements looked the same as eight quiet eighths. These
+       * are the facts the winter reads. */
+      for (const finish of event.result.finishers) {
+        const record = next.driverRecords[finish.driverId];
+        if (!record) continue;
+
+        const tally = tallyOf(record);
+        record.season = {
+          ...tally,
+          races: tally.races + 1,
+          points: tally.points + finish.points,
+          wins: tally.wins + (finish.status === 'FINISHED' && finish.position === 1 ? 1 : 0),
+          podiums:
+            tally.podiums + (finish.status === 'FINISHED' && finish.position <= 3 ? 1 : 0),
+          dnfs: tally.dnfs + (finish.status === 'DNF' ? 1 : 0),
+        };
+        if (finish.status === 'FINISHED') {
+          record.careerBestFinish =
+            record.careerBestFinish == null
+              ? finish.position
+              : Math.min(record.careerBestFinish, finish.position);
+        }
+      }
 
       /* The result is the biggest single thing that moves a driver, and
        * it is judged against the grid slot they started from rather than
@@ -2253,6 +2424,21 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
          * anything is cleared — it is the only record of it there will be. */
         next.seasonArchive = [...next.seasonArchive, archiveSeason(next)].slice(-40);
 
+        /* ---- the feeder series' own season ------------------------- *
+         * Run now, on the field as it stood all year and before anybody
+         * is promoted out of it, so the table the player reads in the
+         * winter is the season they were actually watching. Results
+         * only: twenty-two more cars simulated lap by lap would cost a
+         * great deal and be watched by nobody. */
+        next.f2 = simulateF2Season(
+          next,
+          next.prospects,
+          next.season,
+          next.settings.seasonLength,
+        );
+        next.f2Archive = [...next.f2Archive, next.f2].slice(-40);
+        announceF2Season(next, next.f2);
+
         /* The rest of the grid reshuffles itself: teams move on from
          * drivers who under-delivered or who are simply too old, promote
          * from further down the order, and take a chance on a junior.
@@ -2263,24 +2449,70 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         next.lastTransferWindow = moves;
         announceSillySeason(next, moves);
 
-        /* Contracts run down with the year like every other deal in the
-         * save. One that expires does not end the driver's career — it
-         * simply means their next negotiation starts from nothing. */
-        for (const deal of Object.values(next.deals)) {
-          deal.seasonsRemaining -= 1;
+        /* ---- the winter, for the people --------------------------- *
+         * Retirements, then expiries, then the seats those two opened.
+         * The order matters: a driver who retires is not also released,
+         * and a seat cannot be refilled before it is empty. */
+        const retirements = runRetirements(next);
+        for (const note of retirements) {
+          announceRetirement(next, note);
         }
-        for (const [driverId, deal] of Object.entries(next.deals)) {
-          if (deal.seasonsRemaining > 0) continue;
-          delete next.deals[driverId];
-          if (deal.teamId !== next.playerTeamId) continue;
 
+        /* Contracts run down with the year, and a deal that runs out now
+         * takes the seat with it. It used to be deleted on its own while
+         * the driver stayed in the line-up and kept racing — out of
+         * contract in name and on the grid in fact. */
+        const expiries = runContractExpiries(next);
+        for (const note of expiries) {
+          if (note.outcome === 'RENEWED' || note.teamId !== next.playerTeamId) continue;
+
+          const name = effectiveDriver(next, note.driverId)?.lastName ?? note.driverId;
           postMail(next, {
             category: 'TRANSFER',
             from: 'Sporting Director',
-            subject: `${DRIVER_BY_ID[driverId]?.lastName ?? driverId} is out of contract`,
+            subject: `${name} has left the team`,
             importance: 'HIGH',
-            driverId,
-            body: `His deal has run out. He is still in the squad for now, but nothing is holding him here — agree new terms before somebody else does.`,
+            driverId: note.driverId,
+            body:
+              `His contract expired at the end of the season and no new terms were agreed, ` +
+              `so he is no longer ours. He has left the squad and is a free agent — anybody ` +
+              `can sign him now, and that includes us, at whatever the market says he is worth.\n\n` +
+              `If you want him back, the driver market is the place. If you do not, you need ` +
+              `somebody in that seat before the first race.`,
+          });
+        }
+
+        /* Rivals sign back up to two cars from the free-agent market and
+         * the feeder series. The player's team is deliberately left as
+         * they left it — an empty seat is theirs to fill. */
+        const signings = refillGrid(next);
+        for (const note of signings) {
+          announceTransferNote(next, note.note);
+        }
+
+        /* Anybody who has now spent two winters without a drive has
+         * taken one somewhere else. Run last, so a driver who found a
+         * seat in the refill above is not counted as still waiting. */
+        const lapsed = runAttrition(next);
+        if (lapsed.length > 0) {
+          announceTransferNote(
+            next,
+            `${lapsed.length} driver${lapsed.length === 1 ? '' : 's'} leave the sport without finding a seat for ${next.season + 1}.`,
+          );
+        }
+
+        const short = emptyPlayerSeats(next);
+        if (short > 0) {
+          postMail(next, {
+            category: 'BOARD',
+            from: 'Team Principal',
+            subject: short === 1 ? 'We are a driver short' : 'We have no drivers',
+            importance: 'HIGH',
+            body:
+              `We are entering ${GRID_SEATS_PER_TEAM - short} car${GRID_SEATS_PER_TEAM - short === 1 ? '' : 's'} ` +
+              `as things stand. Every seat we do not fill is a season of points we do not score.\n\n` +
+              `Sign a free agent, promote from the feeder series, or bring a reserve up — ` +
+              `but do it before the lights go out in ${next.season + 1}.`,
           });
         }
 
@@ -2350,10 +2582,25 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         next.finance.seasonIncome = 0;
         next.finance.seasonExpenditure = 0;
 
-        /* A new year, a new intake and a new set of people looking for
-         * work. Both markets are keyed on the season, so passing on a
-         * class means it is genuinely gone. */
-        next.prospects = buildProspects(next.season);
+        /* ---- the feeder series ------------------------------------ *
+         * The bottom five are let go and the openings filled from the
+         * new intake, which carries the rare talent due this year. A
+         * junior the player has been watching all season is still there
+         * next season, one year better and one year more expensive. */
+        const churn = regenerateF2Field(next.prospects, next.f2, next.season);
+        next.prospects = churn.field;
+        if (churn.released.length > 0 && next.playerTeamId) {
+          postMail(next, {
+            category: 'STAFF',
+            from: 'Head of Scouting',
+            subject: `${churn.released.length} released from the feeder series`,
+            importance: 'LOW',
+            body:
+              `The bottom of the F2 table has been cleared out for ${next.season}: ` +
+              `${churn.released.map((entry) => `${entry.firstName} ${entry.lastName}`).join(', ')}.` +
+              `\n\nTheir seats have gone to this year's intake. Worth a look before somebody else takes one.`,
+          });
+        }
 
         /* The winter. Rival teams spend heavily and land it all before
          * the first race, so round one of a new year is genuinely a new
@@ -2364,6 +2611,39 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
         overridePhase = 'SEASON_REVIEW';
       } else {
         next.round += 1;
+
+        /* Halfway through the year, a reminder of who is out of contract
+         * at the end of it.
+         *
+         * Losing a driver to an expiry is a fair consequence; losing one
+         * with no warning is not. This is the one the player can still
+         * act on — there is a whole half-season left to agree terms. */
+        if (next.playerTeamId && next.round === Math.max(2, Math.ceil(next.settings.seasonLength / 2))) {
+          const expiring = expiringDeals(next);
+          if (expiring.length > 0) {
+            postMail(next, {
+              category: 'TRANSFER',
+              from: 'Sporting Director',
+              subject:
+                expiring.length === 1
+                  ? `${effectiveDriver(next, expiring[0]!.driverId)?.lastName ?? 'A driver'} is out of contract in the winter`
+                  : `${expiring.length} contracts run out at the end of the season`,
+              importance: 'HIGH',
+              driverId: expiring.length === 1 ? expiring[0]!.driverId : undefined,
+              body:
+                expiring
+                  .map(
+                    (deal) =>
+                      `• ${effectiveDriver(next, deal.driverId)?.lastName ?? deal.driverId} — ` +
+                      `${deal.role === 'RACE' ? 'race seat' : 'reserve'}, ` +
+                      `${(deal.salary / 1_000_000).toFixed(1)}M a season`,
+                  )
+                  .join('\n') +
+                `\n\nWhen a deal runs out it runs out: they leave the squad and anybody can sign ` +
+                `them. Renew on the driver market while we still have the conversation to ourselves.`,
+            });
+          }
+        }
       }
 
       /* Rival teams develop their cars between rounds. At the easier

@@ -50,6 +50,10 @@ import { preRaceBriefing, postRaceBriefing } from '../src/game/briefing';
 import { ROLES } from '../src/data/staff';
 import { staffMarket, staffReputationBonus, staffRndEfficiency, vacantRoles } from '../src/game/staffing';
 import { rndEfficiency } from '../src/game/facilities';
+import { F2_FIELD_SIZE, F2_MAX_SEASONS } from '../src/game/feederSeries';
+import { TIERS, buildIntake, tierDueIn } from '../src/game/youthTalent';
+import { freeAgents, isFreeAgent, runContractExpiries } from '../src/game/offSeason';
+import { VETERAN_AGE, advanceDriverSeason, blankRecord, performanceIndex } from '../src/game/driverDevelopment';
 import { buildTracks } from '../src/lib/careerGen';
 import {
   MAX_SQUAD_SIZE,
@@ -597,14 +601,11 @@ check(
   `${window_.length} move(s)`,
 );
 check(
-  'every team still fields exactly two cars after the window',
-  (() => {
-    const counts = new Map<string, number>();
-    for (const teamId of Object.values(state.driverTeams)) {
-      counts.set(teamId, (counts.get(teamId) ?? 0) + 1);
-    }
-    return [...counts.values()].every((n) => n === 2);
-  })(),
+  'every rival team still enters two cars after the window',
+  state.teams
+    .filter((team) => team.teamId !== state.playerTeamId)
+    .every((team) => raceDriversOf(state, team.teamId).length === 2),
+  state.teams.map((t) => `${t.teamId}:${raceDriversOf(state, t.teamId).length}`).join(' '),
 );
 check(
   "the player's own line-up is never touched by the AI market",
@@ -859,7 +860,12 @@ check(
 );
 
 const youngId = GRID_2026_DRIVERS.reduce((a, b) => (a.age < b.age ? a : b)).id;
-const oldId = GRID_2026_DRIVERS.reduce((a, b) => (a.age > b.age ? a : b)).id;
+/* The oldest driver on the grid is no longer a safe subject for the
+ * decline checks: they now retire, and a retired driver stops moving
+ * along the curve entirely. The oldest one still racing is. */
+const oldId = GRID_2026_DRIVERS.filter((d) => !state.retiredDriverIds.includes(d.id)).reduce(
+  (a, b) => (a.age > b.age ? a : b),
+).id;
 const youngDeltas = state.driverRecords[youngId]?.deltas ?? {};
 const oldDeltas = state.driverRecords[oldId]?.deltas ?? {};
 
@@ -940,11 +946,25 @@ console.log('\n== junior intake ==');
 
 check('a class is generated for the season', state.prospects.length > 0, `${state.prospects.length} juniors`);
 check(
-  'the class is regenerated for the new season',
-  state.prospects.every((p) => p.scoutedInSeason === state.season),
-  `class of ${state.season}`,
+  'the feeder series runs a full grid',
+  state.prospects.length === F2_FIELD_SIZE,
+  `${state.prospects.length} cars`,
 );
-check('juniors are young', state.prospects.every((p) => p.age <= 21 && p.age >= 17));
+check(
+  'the field carries over rather than being thrown away',
+  state.prospects.some((p) => p.scoutedInSeason < state.season),
+  `${state.prospects.filter((p) => p.scoutedInSeason < state.season).length} held over`,
+);
+check(
+  'and the seats that opened were filled from this year\'s intake',
+  state.prospects.some((p) => p.scoutedInSeason === state.season),
+  `${state.prospects.filter((p) => p.scoutedInSeason === state.season).length} new`,
+);
+check(
+  'juniors are young',
+  state.prospects.every((p) => p.age >= 16 && p.age <= 24),
+  `${Math.min(...state.prospects.map((p) => p.age))}-${Math.max(...state.prospects.map((p) => p.age))}`,
+);
 check(
   'juniors are signed on a ceiling above where they are today',
   state.prospects.every((p) => p.potential > driverRating(prospectToDriver(p))),
@@ -972,8 +992,19 @@ check(
   promoted.finance.ledger.some((e) => e.kind === 'TRANSFER' && e.amount < 0),
 );
 check(
-  'the team still fields two cars',
-  Object.values(promoted.driverTeams).filter((t) => t === promoted.playerTeamId).length === 2,
+  'the squad is one bigger for the signing and one smaller for the release',
+  squadOf(promoted, promoted.playerTeamId).length ===
+    squadOf(state, state.playerTeamId).length,
+  `${squadOf(state, state.playerTeamId).length} -> ${squadOf(promoted, promoted.playerTeamId).length}`,
+);
+check(
+  'the junior leaves the feeder series behind them',
+  !promoted.prospects.some((p) => p.id === freeProspect.id),
+);
+check(
+  'and the series is back to a full grid',
+  promoted.prospects.length === F2_FIELD_SIZE,
+  `${promoted.prospects.length} cars`,
 );
 
 console.log('\n== season archive ==');
@@ -2607,6 +2638,555 @@ console.log('\n== drivers write about their own car ==');
   check(
     'a part is only reported finished the weekend it goes',
     logs.length < 2 || (firstLog !== laterLog && laterLog!.body !== firstLog!.body),
+  );
+}
+
+/* ===================================================================== *
+ * Careers that end, and the series that replaces them
+ * ===================================================================== */
+
+console.log('\n== contracts actually run out ==');
+
+{
+  /* The reported bug: a driver whose contract expired stayed in the
+   * team and kept racing. Two halves to it — the deals were synthesised
+   * on demand from the data file rather than written down (so nothing
+   * ever ran down), and the expiry deleted the deal while leaving the
+   * seat map alone. Both are checked here. */
+  let g = createNewGame('Contract Check');
+  g = must(g, { type: 'SET_SETTINGS', settings: { seasonLength: 4 } }, 'settings');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'team');
+
+  check(
+    'every driver on the grid starts on a written contract',
+    Object.keys(g.deals).length === GRID_2026_DRIVERS.length,
+    `${Object.keys(g.deals).length} deals for ${GRID_2026_DRIVERS.length} drivers`,
+  );
+  check(
+    'and the terms come from the data file rather than a default',
+    new Set(Object.values(g.deals).map((d) => d.seasonsRemaining)).size > 1,
+    `terms: ${[...new Set(Object.values(g.deals).map((d) => d.seasonsRemaining))].sort().join(', ')}`,
+  );
+
+  // Somebody of ours, forced to one season left.
+  const ourId = raceDriversOf(g, 'williams')[0]!;
+  const doomed: GameState = {
+    ...g,
+    phase: 'POST_RACE',
+    round: g.settings.seasonLength,
+    deals: { ...g.deals, [ourId]: { ...g.deals[ourId]!, seasonsRemaining: 1 } },
+  };
+  /* The expiry itself, before the winter market gets to react to it.
+   * Run directly, because by the time the reducer is finished a rival
+   * has usually signed the man — which is correct, and which would hide
+   * exactly the step being tested here. */
+  {
+    const isolated: GameState = JSON.parse(JSON.stringify(doomed));
+    const notes = runContractExpiries(isolated);
+    const ours = notes.find((n) => n.driverId === ourId);
+
+    check('the deal is settled at the rollover', Boolean(ours), ours?.outcome);
+    check(
+      'the player is never quietly re-signed for',
+      ours?.outcome === 'RELEASED',
+      `${effectiveDriver(isolated, ourId)?.lastName}: ${ours?.outcome}`,
+    );
+    check('a deal that runs out is gone', !isolated.deals[ourId]);
+    check('and the driver leaves the team with it', !isolated.driverTeams[ourId]);
+    check(
+      'so they cannot take the grid',
+      !gridDriverIds(isolated).includes(ourId),
+      `${gridDriverIds(isolated).length} cars entered`,
+    );
+    check('they are a free agent rather than nobody', isFreeAgent(isolated, ourId));
+    check(
+      'and the market lists them',
+      freeAgents(isolated).includes(ourId),
+      `${freeAgents(isolated).length} free agent(s)`,
+    );
+    check(
+      'a driver still under contract is not one',
+      !isFreeAgent(isolated, raceDriversOf(isolated, 'redbull')[0]!),
+    );
+
+    // And the player can put it right.
+    const resigned = transition(
+      { ...isolated, phase: 'HUB' },
+      { type: 'SIGN_FREE_AGENT', driverId: ourId },
+    );
+    check('a free agent can be signed back', resigned.ok, resigned.message);
+    check(
+      'and is on the books again',
+      resigned.state?.driverTeams[ourId] === isolated.playerTeamId,
+    );
+    check(
+      'a driver under contract cannot be taken for free',
+      !transition({ ...isolated, phase: 'HUB' }, {
+        type: 'SIGN_FREE_AGENT',
+        driverId: raceDriversOf(isolated, 'redbull')[0]!,
+      }).ok,
+    );
+  }
+
+  const after = must(doomed, { type: 'CONTINUE_TO_NEXT_WEEK' }, 'roll the season');
+
+  check(
+    'the driver is no longer ours after the winter',
+    after.driverTeams[ourId] !== after.playerTeamId,
+    `now at ${after.driverTeams[ourId] ?? 'no team'}`,
+  );
+  check(
+    'the player is told, in as many words',
+    after.mail.some((m) => m.driverId === ourId && m.subject.includes('has left the team')),
+  );
+  check(
+    'and told they are short of a driver',
+    after.mail.some((m) => m.subject.includes('driver short') || m.subject.includes('no drivers')),
+  );
+  check(
+    'a driver we let go can be picked up by somebody else',
+    !after.driverTeams[ourId] || after.driverTeams[ourId] !== after.playerTeamId,
+  );
+
+  /* The rest of the grid is not left with holes in it — only the
+   * player's team is, because only the player's decisions made them. */
+  check(
+    'rivals fill the seats the winter emptied',
+    after.teams
+      .filter((t) => t.teamId !== after.playerTeamId)
+      .every((t) => raceDriversOf(after, t.teamId).length === 2),
+  );
+}
+
+console.log('\n== careers end ==');
+
+{
+  let g = createNewGame('Retirement Check');
+  g = must(g, { type: 'SET_SETTINGS', settings: { seasonLength: 4 } }, 'settings');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'team');
+
+  const after = must(
+    { ...g, phase: 'POST_RACE', round: g.settings.seasonLength },
+    { type: 'CONTINUE_TO_NEXT_WEEK' },
+    'roll the season',
+  );
+
+  check(
+    'the oldest drivers retire',
+    after.retiredDriverIds.length > 0,
+    after.retiredDriverIds
+      .map((id) => `${effectiveDriver(after, id)?.lastName} (${after.driverRecords[id]?.age})`)
+      .join(', '),
+  );
+  check(
+    'and it is the old ones, not a random draw',
+    after.retiredDriverIds.every((id) => (after.driverRecords[id]?.age ?? 0) >= 34),
+  );
+  check('a retired driver holds no seat', after.retiredDriverIds.every((id) => !after.driverTeams[id]));
+  check('and no contract', after.retiredDriverIds.every((id) => !after.deals[id]));
+  check(
+    'they are not on the market either',
+    after.retiredDriverIds.every((id) => !isFreeAgent(after, id)),
+  );
+  check(
+    'the retirement is reported',
+    after.mail.some((m) => m.subject.endsWith('retires')),
+  );
+  check(
+    'the record survives so the career can be read',
+    after.retiredDriverIds.every((id) => Boolean(after.driverRecords[id]?.retiredInSeason)),
+  );
+
+  // Nobody is aged past the hard limit and left racing.
+  check(
+    'nobody on the grid is older than the hard retirement age',
+    gridDriverIds(after).every((id) => (after.driverRecords[id]?.age ?? 0) < 44),
+    `oldest ${Math.max(...gridDriverIds(after).map((id) => after.driverRecords[id]?.age ?? 0))}`,
+  );
+}
+
+console.log('\n== the rating curve has a top ==');
+
+{
+  let g = createNewGame('Age Check');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'team');
+
+  /* A driver having the season of his life, every year, from 35 to 46.
+   * If anything can push a rating up past the veteran line, this will. */
+  const id = 'russell';
+  let probe: GameState = {
+    ...g,
+    driverRecords: { ...g.driverRecords, [id]: blankRecord(id, 35) },
+  };
+
+  const arc: Array<{ age: number; before: number; after: number }> = [];
+  for (let year = 0; year < 12; year++) {
+    const rec = probe.driverRecords[id]!;
+    rec.season = {
+      races: 10, points: 320, wins: 9, podiums: 10,
+      poles: 8, dnfs: 0, qualifyingWins: 10, qualifyingDuels: 10,
+    };
+    const age = rec.age;
+    const before = currentRating(probe, id);
+    advanceDriverSeason(probe);
+    arc.push({ age, before, after: currentRating(probe, id) });
+    probe = { ...probe, season: probe.season + 1 };
+  }
+
+  const past = arc.filter((row) => row.age >= VETERAN_AGE);
+  check(
+    `no rating gain at ${VETERAN_AGE} or older, however good the season`,
+    past.length > 0 && past.every((row) => row.after < row.before),
+    past.map((r) => `${r.age}:${r.before}->${r.after}`).join(' '),
+  );
+  check(
+    'and the decline is gradual rather than a cliff',
+    past.every((row) => row.before - row.after <= 3),
+    `worst drop ${Math.max(...past.map((r) => r.before - r.after))}`,
+  );
+  check(
+    'a veteran below the line can still hold their rating on a good year',
+    arc.some((row) => row.age < VETERAN_AGE && row.after >= row.before),
+  );
+}
+
+console.log('\n== development follows the season ==');
+
+{
+  let g = createNewGame('Form Check');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'team');
+
+  const id = 'lindblad';
+  const mateId = Object.entries(g.driverTeams).find(
+    ([d, t]) => t === g.driverTeams[id] && d !== id,
+  )![0];
+
+  const season = (over: Partial<GameState['driverRecords'][string]['season']>) => ({
+    races: 10, points: 0, wins: 0, podiums: 0, poles: 0, dnfs: 0,
+    qualifyingWins: 5, qualifyingDuels: 10, ...over,
+  });
+
+  const run = (tally: ReturnType<typeof season>) => {
+    const probe: GameState = {
+      ...g,
+      driverRecords: {
+        ...g.driverRecords,
+        [id]: { ...blankRecord(id, 19), season: tally },
+        [mateId]: {
+          ...blankRecord(mateId, 27),
+          season: season({ points: 120, wins: 1, podiums: 4, poles: 2, dnfs: 1 }),
+        },
+      },
+    };
+    const before = currentRating(probe, id);
+    const form = performanceIndex(probe, id);
+    advanceDriverSeason(probe);
+    return { form, gain: currentRating(probe, id) - before };
+  };
+
+  const title = run(season({ points: 320, wins: 9, podiums: 10, poles: 8, qualifyingWins: 9 }));
+  const beaten = run(season({ points: 8, qualifyingWins: 1 }));
+  const broken = run(season({ dnfs: 7, qualifyingWins: 5 }));
+
+  check(
+    'a title year reads as a good season',
+    title.form > 0.4,
+    `form +${title.form.toFixed(2)}`,
+  );
+  check(
+    'being beaten by the team-mate reads as a bad one',
+    beaten.form < 0,
+    `form ${beaten.form.toFixed(2)}`,
+  );
+  check(
+    'and so does retiring from most of it',
+    broken.form < 0,
+    `form ${broken.form.toFixed(2)}`,
+  );
+  check(
+    'the good season develops the driver faster than the bad one',
+    title.gain > beaten.gain && title.gain > broken.gain,
+    `title +${title.gain}, beaten +${beaten.gain}, broken +${broken.gain}`,
+  );
+  check(
+    'and the difference is worth seeing',
+    title.gain - Math.min(beaten.gain, broken.gain) >= 2,
+    `${title.gain - Math.min(beaten.gain, broken.gain)} points of rating apart`,
+  );
+
+  /* Qualifying is counted separately from the points, because it is the
+   * one comparison that has nothing but the driver in it. */
+  const quick = run(season({ points: 0, poles: 4, qualifyingWins: 10 }));
+  const slow = run(season({ points: 0, poles: 0, qualifyingWins: 0 }));
+  check(
+    'out-qualifying the team-mate counts for something on its own',
+    quick.form > slow.form,
+    `${quick.form.toFixed(2)} vs ${slow.form.toFixed(2)}`,
+  );
+}
+
+console.log('\n== the feeder series ==');
+
+{
+  let g = createNewGame('F2 Check');
+  g = must(g, { type: 'SET_SETTINGS', settings: { seasonLength: 8 } }, 'settings');
+  g = must(g, { type: 'CONFIRM_SETUP' }, 'setup');
+  g = must(g, { type: 'PREVIEW_TEAM', teamId: 'williams' }, 'preview');
+  g = must(g, { type: 'CONFIRM_TEAM' }, 'team');
+
+  check('a career starts with a full F2 grid', g.prospects.length === F2_FIELD_SIZE);
+  check('and no championship yet', g.f2 === null);
+
+  const after = must(
+    { ...g, phase: 'POST_RACE', round: g.settings.seasonLength },
+    { type: 'CONTINUE_TO_NEXT_WEEK' },
+    'roll the season',
+  );
+
+  const table = after.f2!;
+  check('the F2 season is run at the rollover', Boolean(table), `${table?.standings.length} entries`);
+  check('it has a champion', Boolean(table.championDriverId));
+  check(
+    'the table is ordered by points',
+    table.standings.every((row, i) => i === 0 || row.points <= table.standings[i - 1]!.points),
+  );
+  check(
+    'positions run 1..n with no holes',
+    table.standings.every((row, i) => row.position === i + 1),
+  );
+  check(
+    'somebody actually won races',
+    table.standings.reduce((sum, row) => sum + row.wins, 0) === g.settings.seasonLength,
+    `${table.standings.reduce((sum, row) => sum + row.wins, 0)} wins across ${g.settings.seasonLength} rounds`,
+  );
+  check(
+    'poles are awarded once a round',
+    table.standings.reduce((sum, row) => sum + row.poles, 0) === g.settings.seasonLength,
+  );
+  check(
+    'the champion is not always the pole-sitter',
+    table.standings[0]!.poles < g.settings.seasonLength,
+  );
+  check(
+    'every row names its driver, so the table survives the field turning over',
+    table.standings.every((row) => row.name.length > 0 && row.name.includes(' ')),
+    table.standings[0]!.name,
+  );
+  check(
+    'the season is archived',
+    after.f2Archive.length === 1 && after.f2Archive[0]!.season === g.season,
+  );
+  check(
+    'the result is reported to the player',
+    after.mail.some((m) => m.subject.startsWith(`F2 ${g.season}:`)),
+  );
+
+  /* The field turns over: the bottom five go, the rest stay a year
+   * older, and the openings are filled from the new intake. */
+  check('the grid is still full after the winter', after.prospects.length === F2_FIELD_SIZE);
+  const heldOver = after.prospects.filter((p) => g.prospects.some((q) => q.id === p.id));
+  check(
+    'most of the field carries over',
+    heldOver.length >= F2_FIELD_SIZE - 8,
+    `${heldOver.length} of ${F2_FIELD_SIZE} held over`,
+  );
+  check(
+    'those who stayed are a year older',
+    heldOver.every((p) => p.age === g.prospects.find((q) => q.id === p.id)!.age + 1),
+  );
+  check(
+    'and a year better',
+    heldOver.some(
+      (p) =>
+        driverRating(prospectToDriver(p)) >
+        driverRating(prospectToDriver(g.prospects.find((q) => q.id === p.id)!)),
+    ),
+  );
+  check(
+    'the bottom of the table is what gets cleared out',
+    (() => {
+      /* Three things take a driver out of the field, and only one of
+       * them is relegation: finishing last, running out of years, and
+       * being promoted to F1 — which is the opposite of relegation and
+       * happens to the drivers at the top of exactly this table. Both
+       * of the others are excluded before the placings are read. */
+      const dropped = g.prospects.filter(
+        (p) =>
+          !after.prospects.some((q) => q.id === p.id) &&
+          !after.driverTeams[p.id] &&
+          p.seasonsInF2 + 1 < F2_MAX_SEASONS,
+      );
+      const places = dropped.map(
+        (p) => table.standings.find((row) => row.driverId === p.id)?.position ?? 0,
+      );
+      return places.length > 0 && places.every((place) => place > F2_FIELD_SIZE / 2);
+    })(),
+    'relegated placings',
+  );
+  check(
+    'the top of the table is what gets promoted',
+    (() => {
+      const promoted = g.prospects.filter((p) => after.driverTeams[p.id]);
+      const places = promoted.map(
+        (p) => table.standings.find((row) => row.driverId === p.id)?.position ?? 99,
+      );
+      // Nobody is promoted at all in a quiet winter, which is fine.
+      return places.every((place) => place <= 6);
+    })(),
+    g.prospects
+      .filter((p) => after.driverTeams[p.id])
+      .map((p) => `${p.lastName} P${table.standings.find((r) => r.driverId === p.id)?.position}`)
+      .join(', ') || 'nobody promoted this winter',
+  );
+  check(
+    'and nobody spends more than their allotted years in the series',
+    after.prospects.every((p) => p.seasonsInF2 < F2_MAX_SEASONS),
+    `longest tenure ${Math.max(...after.prospects.map((p) => p.seasonsInF2))}`,
+  );
+  check(
+    'nobody in the feeder series holds an F1 career record',
+    after.prospects.every((p) => !after.driverRecords[p.id]),
+  );
+
+  /* Promotion, and the seat it leaves behind. */
+  const signable = after.prospects.find((p) => !after.driverTeams[p.id])!;
+  const signed = must(
+    { ...after, phase: 'HUB' },
+    { type: 'SIGN_PROSPECT', prospectId: signable.id },
+    'promote a junior',
+  );
+  check('a promoted junior leaves the series', !signed.prospects.some((p) => p.id === signable.id));
+  check('and somebody new fills the seat', signed.prospects.length === F2_FIELD_SIZE);
+  check(
+    'the replacement is not a namesake of anybody still in it',
+    new Set(signed.prospects.map((p) => `${p.firstName} ${p.lastName}`)).size === F2_FIELD_SIZE,
+  );
+  check('the promoted driver now has an F1 record', Boolean(signed.driverRecords[signable.id]));
+  check('and a condition', Boolean(signed.driverConditions[signable.id]));
+  check(
+    'they are kept somewhere durable, so next winter cannot lose them',
+    signed.academyDrivers.some((p) => p.id === signable.id),
+  );
+}
+
+console.log('\n== talent has tiers ==');
+
+{
+  /* One standout every year, one generational every five, one prodigy
+   * every ten — and the bands do not overlap, which is what makes the
+   * rare ones worth recognising. */
+  const tiers = Array.from({ length: 20 }, (_, i) => tierDueIn(2026 + i));
+  check(
+    'a standout is due most years',
+    tiers.filter((t) => t === 'STANDOUT').length === 14,
+    `${tiers.filter((t) => t === 'STANDOUT').length} of 20`,
+  );
+  check(
+    'a generational talent every five years',
+    tiers.filter((t) => t === 'GENERATIONAL').length === 4,
+    tiers.map((t, i) => (t === 'GENERATIONAL' ? 2026 + i : null)).filter(Boolean).join(', '),
+  );
+  check(
+    'a prodigy every ten',
+    tiers.filter((t) => t === 'PRODIGY').length === 2,
+    tiers.map((t, i) => (t === 'PRODIGY' ? 2026 + i : null)).filter(Boolean).join(', '),
+  );
+  check(
+    'the two rare years never collide',
+    tiers.every((t, i) => !(t === 'PRODIGY' && tiers[i] === 'GENERATIONAL')),
+  );
+  check(
+    'the ceilings rise with the tier and do not overlap',
+    TIERS.STANDARD.potential[1] <= TIERS.STANDOUT.potential[1] &&
+      TIERS.STANDOUT.potential[1] < TIERS.GENERATIONAL.potential[1] &&
+      TIERS.GENERATIONAL.potential[1] < TIERS.PRODIGY.potential[1],
+  );
+  check(
+    'and so does the wage',
+    TIERS.STANDARD.wage < TIERS.STANDOUT.wage &&
+      TIERS.STANDOUT.wage < TIERS.GENERATIONAL.wage &&
+      TIERS.GENERATIONAL.wage < TIERS.PRODIGY.wage,
+  );
+
+  const intake = buildIntake(2030, 22);
+  check(
+    'exactly one driver in a class carries the rare tier',
+    intake.filter((p) => p.tier !== 'STANDARD').length === 1,
+    `${intake.find((p) => p.tier !== 'STANDARD')?.tier} in the class of 2030`,
+  );
+  check(
+    'and 2030 is a prodigy year',
+    intake.some((p) => p.tier === 'PRODIGY'),
+  );
+  check(
+    'a prodigy is rated above every standard junior in the class',
+    (() => {
+      const rare = intake.find((p) => p.tier === 'PRODIGY')!;
+      return intake.filter((p) => p.tier === 'STANDARD').every((p) => p.potential < rare.potential);
+    })(),
+  );
+}
+
+console.log('\n== juniors are individuals ==');
+
+{
+  const classes = [2026, 2027, 2028, 2029, 2030].map((year) => buildIntake(year, 22));
+  const all = classes.flat();
+
+  check(
+    'no two juniors in a class share a name',
+    classes.every((c) => new Set(c.map((p) => `${p.firstName} ${p.lastName}`)).size === c.length),
+  );
+  check(
+    'names are drawn widely across five classes',
+    new Set(all.map((p) => `${p.firstName} ${p.lastName}`)).size >= 100,
+    `${new Set(all.map((p) => `${p.firstName} ${p.lastName}`)).size} distinct names in 110`,
+  );
+  check(
+    'and from many nationalities',
+    new Set(all.map((p) => p.countryCode)).size >= 12,
+    `${new Set(all.map((p) => p.countryCode)).size} countries`,
+  );
+  check(
+    'every archetype turns up',
+    new Set(all.map((p) => p.archetype)).size === 8,
+    [...new Set(all.map((p) => p.archetype))].join(', '),
+  );
+  check(
+    'an archetype actually reshapes the driver',
+    (() => {
+      const rain = all.filter((p) => p.archetype === 'RAIN_MASTER');
+      const others = all.filter((p) => p.archetype !== 'RAIN_MASTER');
+      const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+      return (
+        mean(rain.map((p) => p.attributes.wetWeather)) >
+        mean(others.map((p) => p.attributes.wetWeather)) + 5
+      );
+    })(),
+  );
+  check(
+    'every junior carries a scouting note',
+    all.every((p) => p.note.length > 20),
+  );
+  check(
+    'a class is deterministic on its season',
+    JSON.stringify(buildIntake(2028, 22)) === JSON.stringify(buildIntake(2028, 22)),
+  );
+  check(
+    'and two seasons are different classes',
+    JSON.stringify(buildIntake(2028, 22)) !== JSON.stringify(buildIntake(2029, 22)),
+  );
+  check(
+    'juniors are signed on a ceiling above where they are today',
+    all.every((p) => p.potential > driverRating(prospectToDriver(p))),
   );
 }
 

@@ -7,6 +7,7 @@ import {
   CalendarDays,
   CircleUser,
   FlaskConical,
+  GraduationCap,
   Handshake,
   HardHat,
   History,
@@ -49,6 +50,7 @@ export const NAV_ITEMS: NavItem[] = [
 
   { id: 'career-season', label: 'Season Setup', icon: CalendarCog, group: 'CAREER' },
   { id: 'career-market', label: 'Driver Market', icon: UsersRound, group: 'CAREER' },
+  { id: 'career-youth', label: 'Youth Academy', icon: GraduationCap, group: 'CAREER' },
   { id: 'career-mail', label: 'Mail', icon: Inbox, group: 'CAREER' },
   { id: 'career-social', label: 'Social', icon: RadioTower, group: 'CAREER' },
   { id: 'career-rnd', label: 'R&D Center', icon: FlaskConical, group: 'CAREER' },

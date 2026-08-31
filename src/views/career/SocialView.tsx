@@ -31,6 +31,7 @@ const TOPIC_TONE: Record<SocialTopic, 'neutral' | 'cyan' | 'red' | 'amber' | 'li
     CONTRACT: 'lime',
     TEAM: 'cyan',
     MOOD: 'red',
+    YOUTH: 'cyan',
     RUMOUR: 'neutral',
   };
 
