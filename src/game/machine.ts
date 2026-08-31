@@ -1247,6 +1247,15 @@ export function transition(state: GameState | null, event: GameEvent): Transitio
 
     case 'APPROACH_DRIVER': {
       if (!next.playerTeamId) return refuse('No team selected.');
+      /* A career that has ended is over for every purpose. Without this
+       * a driver whose retirement the player read about in the post
+       * could still be opened talks with — and, holding no contract,
+       * would have come for a free transfer. */
+      if ((next.retiredDriverIds ?? []).includes(event.driverId)) {
+        return refuse(
+          `${effectiveDriver(next, event.driverId)?.lastName ?? 'That driver'} has retired from the sport.`,
+        );
+      }
       if (next.driverTeams[event.driverId] === next.playerTeamId) {
         return refuse('That driver already races for you.');
       }

@@ -89,50 +89,98 @@ interface ArchetypeSpec {
   label: string;
   /** Signed shifts on the authored attributes, in rating points. */
   shift: Partial<Record<keyof DriverAttributes, number>>;
-  /** How the scouting report describes them. */
-  note: string;
+  /**
+   * How the scouting report describes them — several ways.
+   *
+   * One line per archetype was one line too few. Twenty-two juniors
+   * drawn from eight archetypes means the same sentence appears three
+   * times on a screen the player is being asked to read carefully, and
+   * two drivers described in identical words do not read as two people
+   * however different their numbers are.
+   */
+  notes: string[];
 }
 
 export const ARCHETYPES: Record<DriverArchetype, ArchetypeSpec> = {
   RAW_SPEED: {
     label: 'Raw speed',
     shift: { pace: 6, cornering: 3, consistency: -6, tyreManagement: -4 },
-    note: 'Quickest thing in the paddock over one lap and has no idea where the limit is yet.',
+    notes: [
+      'Quickest thing in the paddock over one lap and no idea yet where the limit is.',
+      'Devastating when it comes together. It does not come together every weekend.',
+      'Has more natural speed than anyone in the series and loses it in handfuls.',
+      'Four tenths quicker than the field and three spins a meeting. Both are real.',
+    ],
   },
   QUALIFIER: {
     label: 'Qualifier',
     shift: { pace: 4, reaction: 5, braking: 3, stamina: -4, racecraft: -3 },
-    note: 'Puts it on pole and then spends Sunday learning what to do with it.',
+    notes: [
+      'Puts it on pole and then spends Sunday learning what to do with it.',
+      'One lap on new rubber and he is untouchable. Sixty laps is a different question.',
+      'Saturday specialist. His race pace is somebody else you have not met.',
+      'Finds a lap from nowhere when it counts and cannot repeat it an hour later.',
+    ],
   },
   RACER: {
     label: 'Racer',
     shift: { attack: 7, racecraft: 5, pace: -2, reaction: 2 },
-    note: 'Ordinary on Saturday, ruthless on Sunday. Passes people who are quicker than him.',
+    notes: [
+      'Ordinary on Saturday, ruthless on Sunday. Passes people who are quicker than him.',
+      'Qualifies eighth and finishes third. Does it again the next weekend.',
+      'Reads a race two corners ahead of everybody else on the grid.',
+      'You will not enjoy defending against him and neither will anybody else.',
+    ],
   },
   TYRE_WHISPERER: {
     label: 'Tyre whisperer',
     shift: { tyreManagement: 9, consistency: 5, pace: -3, attack: -3 },
-    note: 'Makes a set last laps nobody else can. Strategists love him; the crowd does not.',
+    notes: [
+      'Makes a set last laps nobody else can. Strategists love him; the crowd does not.',
+      'Comes in ten laps after everybody else on rubber that still looks new.',
+      'Never spectacular and always there at the end, on the tyres he started with.',
+      'Gives the pit wall an option nobody else on the grid can offer them.',
+    ],
   },
   RAIN_MASTER: {
     label: 'Rain master',
     shift: { wetWeather: 12, adaptability: 4, pace: -2 },
-    note: 'Unremarkable in the dry and completely unrecognisable the moment it rains.',
+    notes: [
+      'Unremarkable in the dry and completely unrecognisable the moment it rains.',
+      'Watch him in the wet once and you will stop caring what he does in the dry.',
+      'Finds grip on a wet track that the timing screen says is not there.',
+      'Two of his three wins came in a downpour. So did the other one, nearly.',
+    ],
   },
   IRON_NERVE: {
     label: 'Iron nerve',
     shift: { consistency: 8, defence: 6, stamina: 4, attack: -4 },
-    note: 'Never puts a wheel wrong and will not be moved. Bring a crowbar.',
+    notes: [
+      'Never puts a wheel wrong and will not be moved. Bring a crowbar.',
+      'Sixty laps within two tenths of himself. It is almost unsettling to watch.',
+      'Defends like the car behind is not there. Usually it ends up not being there.',
+      'Makes no mistakes, takes no risks, and is still ahead of you at the flag.',
+    ],
   },
   ENGINEER: {
     label: 'Engineer',
     shift: { feedback: 11, adaptability: 5, consistency: 3, attack: -3 },
-    note: 'Debriefs like a technical director. The car gets quicker with him in it.',
+    notes: [
+      'Debriefs like a technical director. The car gets quicker with him in it.',
+      'Tells you exactly what the car is doing and exactly what would fix it.',
+      'Not the quickest here. The team he joins will be quicker for having him.',
+      'Reads a setup sheet better than most of the people who write them.',
+    ],
   },
   STREET_FIGHTER: {
     label: 'Street fighter',
     shift: { braking: 7, attack: 5, cornering: 3, tyreManagement: -5 },
-    note: 'Lives on the brakes and inside the white line. Walls do not bother him.',
+    notes: [
+      'Lives on the brakes and inside the white line. Walls do not bother him.',
+      'Brakes later than the data says is possible and has the results to argue with it.',
+      'Give him a street circuit and a set of softs and get out of the way.',
+      'Fearless between the barriers, and it costs him a front wing a season.',
+    ],
   },
 };
 
@@ -244,7 +292,7 @@ export interface GenerateOptions {
 export function generateProspect(options: GenerateOptions): ProspectDriver {
   const { season, index } = options;
   const tier = options.tier ?? 'STANDARD';
-  const spec = TIERS[tier];
+  const tierSpec = TIERS[tier];
   const id = `youth-${season}-${index}`;
   const next = stream(id);
 
@@ -258,13 +306,15 @@ export function generateProspect(options: GenerateOptions): ProspectDriver {
   const lastName = lastNames[Math.floor(named() * lastNames.length)]!;
 
   const archetype = ARCHETYPE_IDS[Math.floor(next() * ARCHETYPE_IDS.length)]!;
-  const shift = ARCHETYPES[archetype].shift;
+  const spec = ARCHETYPES[archetype];
+  const shift = spec.shift;
+  const note = spec.notes[Math.floor(next() * spec.notes.length)]!;
 
-  const potential = Math.round(between(next(), spec.potential));
-  const age = Math.round(between(next(), spec.age));
+  const potential = Math.round(between(next(), tierSpec.potential));
+  const age = Math.round(between(next(), tierSpec.age));
   /* What they are *today*. The gap between this and the ceiling is the
    * whole gamble, and it is wider on the young. */
-  const raw = Math.round(potential - between(next(), spec.gap));
+  const raw = Math.round(potential - between(next(), tierSpec.gap));
 
   /* Spread around the raw number, then the archetype on top. A junior is
    * quick and fearless and short on everything laps teach; the seeding
@@ -300,11 +350,11 @@ export function generateProspect(options: GenerateOptions): ProspectDriver {
     potential,
     tier,
     archetype,
-    note: ARCHETYPES[archetype].note,
+    note,
     attributes,
     seasonsInF2: 0,
     salary:
-      Math.round((700_000 + potential * 21_000) * spec.wage / 100_000) * 100_000,
+      Math.round((700_000 + potential * 21_000) * tierSpec.wage / 100_000) * 100_000,
     scoutedInSeason: season,
   };
 }

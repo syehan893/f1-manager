@@ -111,10 +111,22 @@ export function GameProvider({ children }: { children: ReactNode }) {
      * A driver with no entry in `driverTeams` has lost their seat — they
      * must not keep the team the data file gave them, or a driver the
      * player released goes on showing up in their own line-up. */
-    const established = GRID_2026_DRIVERS.map((driver) => {
-      const teamId = state.driverTeams[driver.id] ?? '';
-      return teamId === driver.teamId ? driver : { ...driver, teamId };
-    });
+    /* A career that has ended is over everywhere.
+     *
+     * Retirement takes a driver's seat and their contract, but the
+     * roster is built from the static data file, so without this a
+     * driver whose retirement the player read about in the post kept
+     * turning up on the driver market the following week — with no team
+     * and therefore no transfer fee, which made a forty-four-year-old
+     * who had just hung up his helmet the cheapest signing on the grid. */
+    const retired = new Set(state.retiredDriverIds ?? []);
+
+    const established = GRID_2026_DRIVERS.filter((driver) => !retired.has(driver.id)).map(
+      (driver) => {
+        const teamId = state.driverTeams[driver.id] ?? '';
+        return teamId === driver.teamId ? driver : { ...driver, teamId };
+      },
+    );
 
     /* Juniors who have been promoted are not in the 2026 data file, so
      * without this they hold a seat that names nobody: they disappear
@@ -123,7 +135,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
      * track markers can tell them apart from everyone else. */
     const taken = new Set(established.map((driver) => driver.carNumber));
     const graduates = (state.academyDrivers ?? [])
-      .filter((prospect) => Boolean(state.driverTeams[prospect.id]))
+      .filter((prospect) => Boolean(state.driverTeams[prospect.id]) && !retired.has(prospect.id))
       .map((prospect) => {
         let carNumber = 2;
         while (taken.has(carNumber) && carNumber < 100) carNumber++;

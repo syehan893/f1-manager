@@ -2801,6 +2801,36 @@ console.log('\n== careers end ==');
     after.retiredDriverIds.every((id) => Boolean(after.driverRecords[id]?.retiredInSeason)),
   );
 
+  /* The bug this caught: retirement takes the seat and the contract, but
+   * every screen builds its driver list from the static data file — so a
+   * driver whose retirement the player had just read about was still on
+   * the market the following week, with no team and therefore no
+   * transfer fee, which made him the cheapest signing on the grid. */
+  check(
+    'a retired driver is off the roster every screen reads from',
+    (() => {
+      const retired = new Set(after.retiredDriverIds);
+      const listed = GRID_2026_DRIVERS.filter((d) => !retired.has(d.id));
+      return (
+        after.retiredDriverIds.length > 0 &&
+        listed.length === GRID_2026_DRIVERS.length - after.retiredDriverIds.length
+      );
+    })(),
+    `${after.retiredDriverIds.length} removed from ${GRID_2026_DRIVERS.length}`,
+  );
+  check(
+    'and cannot be signed as a free agent',
+    after.retiredDriverIds.every(
+      (id) => !transition({ ...after, phase: 'HUB' }, { type: 'SIGN_FREE_AGENT', driverId: id }).ok,
+    ),
+  );
+  check(
+    'nor approached for a contract',
+    after.retiredDriverIds.every(
+      (id) => !transition({ ...after, phase: 'HUB' }, { type: 'APPROACH_DRIVER', driverId: id }).ok,
+    ),
+  );
+
   // Nobody is aged past the hard limit and left racing.
   check(
     'nobody on the grid is older than the hard retirement age',
